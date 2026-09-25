@@ -21,6 +21,9 @@ Google-style docstrings, full type annotations.
 
 from __future__ import annotations
 
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 import logging
 import os
 import time
@@ -399,7 +402,7 @@ class ExperimentOrchestrator:
 
     # Public API
 
-    def run_all(self, df: pd.DataFrame) -> pd.DataFrame:
+    def run_all(self, df: pd.DataFrame, output_csv_path: Optional[str] = None) -> pd.DataFrame:
         """Run all four experiments across every row in ``df``.
 
         Iterates rows in a single pass using ``tqdm`` for progress
@@ -432,8 +435,10 @@ class ExperimentOrchestrator:
 
         exp_ids = ["EXP_001", "EXP_002", "EXP_003", "EXP_004"]
 
-        # Initialise result lists
-        results: Dict[str, List[str]] = {exp: [] for exp in exp_ids}
+        # Prepare output DataFrame
+        df_out = df.copy()
+        for exp_id in exp_ids:
+            df_out[f"{exp_id}_Decision"] = pd.Series(dtype=str)
 
         mode_label = "DRY RUN" if self.dry_run else f"API ({self.model_name})"
         logger.info(
@@ -450,8 +455,8 @@ class ExperimentOrchestrator:
             "EXP_004": "[5] EXPERIMENT 004: BASELINE (2025 Context)",
         }
 
-        for _, row in tqdm(
-            df.iterrows(),
+        for idx, row in tqdm(
+            df_out.iterrows(),
             total=len(df),
             desc="LLM Experiments",
             unit="borrower",
@@ -473,7 +478,7 @@ class ExperimentOrchestrator:
 
             for exp_id in exp_ids:
                 prompt, raw_res, decision, sources, reasoning = self._run_single_experiment(exp_id, row)
-                results[exp_id].append(decision)
+                df_out.at[idx, f"{exp_id}_Decision"] = decision
                 
                 audit_chunks.extend([
                     f"----------------------------------------------------------------------",
@@ -492,12 +497,12 @@ class ExperimentOrchestrator:
                     
             if not self.dry_run:
                 time.sleep(2)
-
-        # Attach results to a copy of the input DataFrame
-        df_out = df.copy()
-        for exp_id in exp_ids:
-            col_name = f"{exp_id}_Decision"
-            df_out[col_name] = results[exp_id]
+            
+            if output_csv_path:
+                try:
+                    df_out.to_csv(output_csv_path, index=False)
+                except PermissionError:
+                    logger.warning("CSV is currently open in Excel; keeping results in memory and will update once closed.")
 
         # Log decision distributions per experiment
         for exp_id in exp_ids:

@@ -203,6 +203,7 @@ def run_phase3(
     logger.info("=" * 60)
     logger.info("PHASE 3 — LLM Experiments")
     logger.info("=" * 60)
+    out_path = processed_dir / f"{cfg['paths']['artifact_04_prefix']}_{timestamp}.csv"
     logger.info("Audit directory: %s", audit_dir)
     t0 = time.time()
 
@@ -212,15 +213,20 @@ def run_phase3(
         dry_run=skip_llm, 
         audit_dir=str(audit_dir)
     )
-    df_results = orchestrator.run_all(df_gt)
+    df_results = orchestrator.run_all(df_gt, output_csv_path=str(out_path))
 
     elapsed = time.time() - t0
     logger.info("Phase 3 complete in %.1f s.", elapsed)
 
     # Save timestamped results CSV
-    out_path = processed_dir / f"{cfg['paths']['artifact_04_prefix']}_{timestamp}.csv"
-    df_results.to_csv(out_path, index=False)
-    logger.info("  ✔ Saved results → %s  (%d rows)", out_path, len(df_results))
+    while True:
+        try:
+            df_results.to_csv(out_path, index=False)
+            logger.info("  ✔ Saved results → %s  (%d rows)", out_path, len(df_results))
+            break
+        except PermissionError:
+            logger.warning("CSV is currently open in Excel. Please close it so we can write the final results. Retrying in 5 seconds...")
+            time.sleep(5)
 
     return df_results
 
