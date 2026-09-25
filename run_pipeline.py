@@ -309,8 +309,7 @@ def main() -> None:
         sys.exit(1)
 
     if args.skip_llm:
-        logger.info("--skip-llm flag passed. Exiting cleanly before Phase 3.")
-        return
+        logger.info("--skip-llm flag passed. LLM calls will be bypassed and logged as LLM_SKIPPED.")
 
     try:
         df_results = run_phase3(

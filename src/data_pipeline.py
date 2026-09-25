@@ -106,6 +106,7 @@ def load_raw(raw_csv_path: str) -> pd.DataFrame:
     if missing_cols:
         raise ValueError(f"Raw CSV missing required columns: {missing_cols}")
 
+    df = df.copy()
     df["AGE_YEARS"]      = (df["DAYS_BIRTH"].abs() / 365.25).round(2)
     df["EMPLOYED_YEARS"] = df["DAYS_EMPLOYED"].apply(
         lambda x: round(abs(x) / 365.25, 2) if pd.notna(x) and x < 0 else 0.0

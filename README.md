@@ -181,9 +181,9 @@ GEMINI_API_KEY="your_actual_api_key_here"
 | Execution Command | Intent description |
 | :--- | :--- |
 | `python src/data_pipeline.py` | Standalone Phase 1 data & Ground Truth generation only. |
-| `python run_pipeline.py --skip-llm` | Full pipeline setup for all borrowers, skipping Phase 3 LLM calls entirely. |
+| `python run_pipeline.py --skip-llm` | Full pipeline setup for all borrowers, bypassing LLM API calls and saving Phase 3 outputs with "LLM_SKIPPED" placeholders. |
 | `python run_pipeline.py --test-mode` | Runs all 3 phases including LLM for a small test subset. Edit the configuration variable `TEST_BORROWER_COUNT` or `TEST_BORROWER_IDS` block right at the top of `run_pipeline.py` to dictate sizes. |
-| `python run_pipeline.py --test-mode --skip-llm` | Test subset data generation only, strictly blocking any LLM API costs. |
+| `python run_pipeline.py --test-mode --skip-llm` | Test subset data generation only, bypassing LLM API calls and saving Phase 3 outputs with "LLM_SKIPPED" placeholders. |
 | `python run_pipeline.py` | Full production run for all 500 benchmark borrowers analyzing all 4 experimental prompts end-to-end. |
 
 ---
