@@ -1,0 +1,9 @@
+venv/
+.env
+__pycache__/
+.DS_Store
+
+# Ignore large data artifacts but keep the directory layout intact
+data/raw/*.csv
+data/processed/*.csv
+data/borrowers_audit/*.txt

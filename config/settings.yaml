@@ -1,0 +1,91 @@
+# =============================================================
+# settings.yaml — Central configuration for GEN_AI_PROJECT_V2
+# =============================================================
+# API keys are NEVER stored here. Load them from .env via python-dotenv.
+# =============================================================
+
+# ── Paths ─────────────────────────────────────────────────────
+paths:
+  raw_data:         "data/raw/application_train.csv"
+  processed_dir:    "data/processed"
+  audit_dir:        "data/borrowers_audit"
+  policy_docs_dir:  "policy_documents"
+  model_output_dir: "models"
+
+  # Intermediate artifact filenames (written to processed_dir)
+  artifact_01_records:      "01_cleaned_experimental_records.csv"
+  artifact_02_features:     "02_experimental_features.csv"
+  artifact_03_ground_truth: "03_ground_truth_decisions.csv"
+  # Artifact 04 gets a timestamp appended at runtime
+  artifact_04_prefix:       "04_llm_experiment_results"
+
+  # Frozen PD model
+  pd_model_filename: "pd_model.pkl"
+
+# ── Data Pipeline ─────────────────────────────────────────────
+data:
+  random_seed:         42
+  sample_size:         500          # Number of experimental records to extract
+  target_column:       "TARGET"     # 0 = performing loan (used for sampling)
+  sample_from_target0: true         # If true, sample only TARGET==0 records
+
+  # Model training features
+  model_features:
+    - AMT_INCOME_TOTAL
+    - AMT_CREDIT
+    - AMT_ANNUITY
+    - AGE_YEARS
+    - EMPLOYED_YEARS
+    - EXT_SOURCE_1
+    - EXT_SOURCE_2
+    - EXT_SOURCE_3
+
+  # Features required to exist (non-null) in the raw CSV to keep a row
+  required_raw_cols:
+    - AMT_INCOME_TOTAL
+    - AMT_CREDIT
+    - AMT_ANNUITY
+    - AMT_GOODS_PRICE
+    - DAYS_BIRTH
+    - DAYS_EMPLOYED
+    - TARGET
+
+# ── PD Model ──────────────────────────────────────────────────
+pd_model:
+  max_iter:     1000
+  random_state: 42
+  test_size:    0.2   # Fraction of cleaned data used for model validation
+
+# ── Ground Truth Thresholds (2026 Policy) ────────────────────
+ground_truth:
+  pti:   # Payment-to-Income  (%)
+    standard:  20.0
+    enhanced:  30.0
+  cti:   # Credit-to-Income   (ratio)
+    standard:  3.0
+    enhanced:  5.0
+  lgv:   # Loan-to-Goods-Value (%)
+    standard:  100.0
+    enhanced:  110.0
+  pd:    # Probability of Default (%)
+    low_max:       2.0
+    moderate_max:  4.99
+    elevated_max:  6.99
+    # >= 7.0 → High
+
+# ── LLM Settings ──────────────────────────────────────────────
+# API key is loaded from .env → GEMINI_API_KEY. Never store it here.
+llm:
+  provider:        "gemini"
+  model_name:      "gemini-3.6-flash"
+  temperature:     0.1       # Low temperature for deterministic risk decisions
+  max_tokens:      8192
+  request_timeout: 60        # Seconds before giving up on an API call
+
+# ── Experiments ───────────────────────────────────────────────
+experiments:
+  policy_years:
+    exp_001: 2026
+    exp_002: 2026
+    exp_003: 2026
+    exp_004: 2025
