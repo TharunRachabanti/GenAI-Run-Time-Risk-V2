@@ -3,7 +3,7 @@
 ## Executive Summary
 The GenAI Credit-Risk Decision Engine is an enterprise credit risk evaluation framework designed to benchmark traditional quantitative credit modeling against modern Generative AI underwriting workflows. 
 
-The engine compares a frozen traditional machine learning baseline—a Probability of Default (PD) scoring model—against Large Language Model (LLM) decision-making across four controlled experimental prompts. The system uses Retrieval-Augmented Generation (RAG) to enforce institutional credit policy documents and native JSON Structured Outputs to guarantee deterministic, parse-safe underwriting decisions.
+The engine compares a frozen traditional machine learning baseline—a Probability of Default (PD) scoring model—against Large Language Model (LLM) decision-making across three controlled experimental prompts. The system uses Retrieval-Augmented Generation (RAG) to enforce institutional credit policy documents and native JSON Structured Outputs to guarantee deterministic, parse-safe underwriting decisions.
 
 ---
 
@@ -26,7 +26,7 @@ The `run_pipeline.py` script serves as the master orchestrator. It loads core se
 ┌────────────────────────────────────────────────────────┐
 │ PHASE 3: LLM Underwriting Experiments                  │
 │ - src/llm_experiments.py (Borrower + Policy -> Gemini) │
-│ - Executes EXP_001, EXP_002, EXP_003, EXP_004          │
+│ - Executes EXP_001, EXP_002, EXP_003                   │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -108,11 +108,10 @@ Phase 2 compiles the precise string fragments surrounding crucial rules like "Ma
 
 Phase 3 merges the statistical dataset from Phase 1 (`GROUND_TRUTH_DECISION` row inputs) with the textual corpus of Phase 2 (Policy Context Text) to submit full dynamic prompt evaluations to Google Gemini. 
 
-### The Four AI Experiments
-1. **EXP_001 (Zero-Shot Baseline):** Only basic application metrics are fed in. Evaluates Gemini's raw common sense judgment around consumer finance.
-2. **EXP_002 (Senior Underwriter Persona):** Hardcodes a professional frame demanding caution and structured thinking within the prompt design, analyzing risk tolerance alterations.
-3. **EXP_003 (Chain-of-Thought):** Enforces a rigid analytical breakdown, commanding the model to evaluate exact PTI/CTI caps chronologically before declaring a conclusion.
-4. **EXP_004 (RAG Policy-Grounded):** Feeds strict text fragments directly from Phase 2 representing the institutional policies right into the prompt, serving as the benchmark standard of this Engine.
+### The Three AI Experiments
+1. **EXP_001 (Baseline, Top-K=5):** Basic application metrics are fed in alongside up to 5 top retrieved combination policy docs. Evaluates Gemini's raw rule adherence capability.
+2. **EXP_002 (Conservative Persona, Top-K=5):** Hardcodes a professional frame demanding caution and structured thinking within the prompt design, analyzing risk tolerance alterations alongside 5 policy docs.
+3. **EXP_003 (Baseline, Top-K=3):** Utilizes the exact same neutral baseline prompt as EXP_001, but limits RAG extraction strictly to the Top 3 relevant policies to observe how reduced policy coverage impairs accurate decisioning.
 
 ### JSON Structured Output Engine
 All evaluations run through a rigidly defined Gemini `response_schema` utilizing standard `typing.TypedDict` and the `application/json` MIME-type.
@@ -128,10 +127,10 @@ This architectural upgrade fundamentally hard-locks outputs away from any arbitr
 ### Output Files & Human Auditing
 **Master Results Analytics:** `data/processed/04_llm_experiment_results_<timestamp>.csv`
 
-| Applicant_ID | PD_Score | PTI | CTI | GROUND_TRUTH_DECISION | EXP_001_Decision | EXP_002_Decision | EXP_003_Decision | EXP_004_Decision |
+| Applicant_ID | PD_Score | PTI | CTI | GROUND_TRUTH_DECISION | EXP_001_Decision | EXP_002_Decision | EXP_003_Decision | EXP_001_Retrieved_Policies |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| P012 | 1.02 | 12.0 | 2.5 | APPROVE | APPROVE | APPROVE | APPROVE | APPROVE |
-| P084 | 4.90 | 21.0 | 3.8 | APPROVE WITH CONDITIONS | DECLINE | APPROVE WITH CONDITIONS | APPROVE WITH CONDITIONS | APPROVE WITH CONDITIONS |
+| P012 | 1.02 | 12.0 | 2.5 | APPROVE | APPROVE | APPROVE | APPROVE | Rank 1: ... |
+| P084 | 4.90 | 21.0 | 3.8 | APPROVE WITH CONDITIONS | DECLINE | APPROVE WITH CONDITIONS | APPROVE WITH CONDITIONS | Rank 1: ... |
 
 **Isolated Audit Trails:** Each applicant’s precise Prompt and returned JSON inference structure are documented immediately inside `data/borrowers_audit/PXXX_audit.txt` allowing simple, plain-text accountability of AI decisions for compliance personnel.
 
@@ -184,7 +183,7 @@ GEMINI_API_KEY="your_actual_api_key_here"
 | `python run_pipeline.py --skip-llm` | Full pipeline setup for all borrowers, bypassing LLM API calls and saving Phase 3 outputs with "LLM_SKIPPED" placeholders. |
 | `python run_pipeline.py --test-mode` | Runs all 3 phases including LLM for a small test subset. Edit the configuration variable `TEST_BORROWER_COUNT` or `TEST_BORROWER_IDS` block right at the top of `run_pipeline.py` to dictate sizes. |
 | `python run_pipeline.py --test-mode --skip-llm` | Test subset data generation only, bypassing LLM API calls and saving Phase 3 outputs with "LLM_SKIPPED" placeholders. |
-| `python run_pipeline.py` | Full production run for all 500 benchmark borrowers analyzing all 4 experimental prompts end-to-end. |
+| `python run_pipeline.py` | Full production run for all 500 benchmark borrowers analyzing all 3 experimental prompts end-to-end. |
 
 ---
 

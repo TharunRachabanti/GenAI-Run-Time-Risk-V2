@@ -150,59 +150,14 @@ def _prompt_exp002(borrower_block: str, context: str) -> str:
     )
 
 
-def _prompt_exp003(borrower_block: str, context: str) -> str:
-    """Build the EXP-003 Chain-of-Thought reasoning prompt.
 
-    Args:
-        borrower_block: Formatted borrower metrics string.
-        context: Retrieved 2026 policy context.
-
-    Returns:
-        Complete prompt string.
-    """
-    return (
-        "Evaluate the borrower using the provided policy context. "
-        "First, show your step-by-step logic by checking each metric "
-        "(PTI, CTI, LGV, Probability of Default) against the policy "
-        "thresholds. Keep your step-by-step logic brief and concise. "
-        "Do not write out verbose mathematical formulas or LaTeX. "
-        "Output your FINAL_DECISION directly after your brief reasoning.\n\n"
-        f"POLICY CONTEXT:\n{context}\n\n"
-        f"{_DECISION_RULES_BLOCK}\n\n"
-        f"{borrower_block}\n\n"
-        "Step-by-step analysis:"
-    )
-
-
-def _prompt_exp004(borrower_block: str, context: str) -> str:
-    """Build the EXP-004 neutral prompt with 2025 policy context.
-
-    Identical system instruction to EXP-001; only the injected context differs.
-
-    Args:
-        borrower_block: Formatted borrower metrics string.
-        context: Retrieved **2025** policy context.
-
-    Returns:
-        Complete prompt string.
-    """
-    return (
-        "You are a credit risk assistant. Using ONLY the provided policy "
-        "context below, evaluate the borrower and output your final decision "
-        "as exactly one of: APPROVE, APPROVE WITH CONDITIONS, or DECLINE.\n\n"
-        f"POLICY CONTEXT:\n{context}\n\n"
-        f"{_DECISION_RULES_BLOCK}\n\n"
-        f"{borrower_block}\n\n"
-        "Final Decision:"
-    )
 
 
 # Map experiment ID → prompt builder function
 _PROMPT_BUILDERS = {
     "EXP_001": _prompt_exp001,
     "EXP_002": _prompt_exp002,
-    "EXP_003": _prompt_exp003,
-    "EXP_004": _prompt_exp004,
+    "EXP_003": _prompt_exp001,
 }
 
 
@@ -298,9 +253,8 @@ class ExperimentOrchestrator:
         self.request_timeout: int   = int(llm_cfg["request_timeout"])
 
         # Pre-fetch contexts once (avoid re-concatenating per record)
-        ctx_2026_top5, src_2026_top5 = parser.retrieve_context(2026, top_k=5)
-        ctx_2026_top3, src_2026_top3 = parser.retrieve_context(2026, top_k=3)
-        ctx_2025_top5, src_2025_top5 = parser.retrieve_context(2025, top_k=5)
+        ctx_top5, metadata_top5 = parser.retrieve_context(top_k=5)
+        ctx_top3, metadata_top3 = parser.retrieve_context(top_k=3)
 
         # Initialise LLM client
         self.model: Optional[Any] = None
@@ -310,18 +264,16 @@ class ExperimentOrchestrator:
             logger.info("ExperimentOrchestrator: dry_run=True — LLM calls skipped.")
 
         # Map each experiment to its context and sources
-        self._exp_contexts: Dict[str, Tuple[str, List[str]]] = {
-            "EXP_001": (ctx_2026_top5, src_2026_top5),
-            "EXP_002": (ctx_2026_top5, src_2026_top5),
-            "EXP_003": (ctx_2026_top3, src_2026_top3),
-            "EXP_004": (ctx_2025_top5, src_2025_top5),
+        self._exp_contexts: Dict[str, Tuple[str, List[Dict[str, Any]]]] = {
+            "EXP_001": (ctx_top5, metadata_top5),
+            "EXP_002": (ctx_top5, metadata_top5),
+            "EXP_003": (ctx_top3, metadata_top3),
         }
         
         self._exp_top_k: Dict[str, int] = {
             "EXP_001": 5,
             "EXP_002": 5,
             "EXP_003": 3,
-            "EXP_004": 5,
         }
 
     # Private helpers
@@ -379,23 +331,27 @@ class ExperimentOrchestrator:
         self,
         exp_id: str,
         row: pd.Series,
-    ) -> Tuple[str, str, str, List[str], str]:
+    ) -> Tuple[str, str, str, str, str]:
         """Execute one experiment for a single borrower row.
 
         Args:
-            exp_id: Experiment identifier (``'EXP_001'`` … ``'EXP_004'``).
+            exp_id: Experiment identifier (``'EXP_001'`` … ``'EXP_003'``).
             row: A DataFrame row with PTI, CTI, LGV, FROZEN_PD columns.
 
         Returns:
             Tuple of (prompt, raw_response, extracted_decision, retrieved_sources, reasoning).
         """
         borrower_block = _build_borrower_block(row)
-        context, sources = self._exp_contexts[exp_id]
+        context, sources_meta = self._exp_contexts[exp_id]
         prompt_fn = _PROMPT_BUILDERS[exp_id]
         prompt = prompt_fn(borrower_block, context)
+        
+        sources_str = " | ".join([
+            f"Rank {m['rank']}: {m['policy_id_version']}" for m in sources_meta
+        ])
 
         if self.dry_run:
-            return prompt, "", SKIPPED, sources, ""
+            return prompt, "", SKIPPED, sources_str, ""
 
         try:
             raw_response = self._call_llm(prompt)
@@ -420,7 +376,7 @@ class ExperimentOrchestrator:
                     exp_id,
                     raw_response,
                 )
-            return prompt, raw_response, decision, sources, reasoning
+            return prompt, raw_response, decision, sources_str, reasoning
         except RuntimeError as exc:
             logger.error(
                 "%s | %s — API error: %s",
@@ -428,7 +384,7 @@ class ExperimentOrchestrator:
                 exp_id,
                 exc,
             )
-            return prompt, f"ERROR: {exc}", "API_ERROR", sources, ""
+            return prompt, f"ERROR: {exc}", "API_ERROR", sources_str, ""
 
     # Public API
 
@@ -463,12 +419,14 @@ class ExperimentOrchestrator:
                 f"ExperimentOrchestrator.run_all() — missing columns: {missing}"
             )
 
-        exp_ids = ["EXP_001", "EXP_002", "EXP_003", "EXP_004"]
+        exp_ids = ["EXP_001", "EXP_002", "EXP_003"]
 
         # Prepare output DataFrame
         df_out = df.copy()
         for exp_id in exp_ids:
             df_out[f"{exp_id}_Decision"] = pd.Series(dtype=str)
+            df_out[f"{exp_id}_Reasoning"] = pd.Series(dtype=str)
+            df_out[f"{exp_id}_Retrieved_Policies"] = pd.Series(dtype=str)
 
         mode_label = "DRY RUN" if self.dry_run else f"API ({self.model_name})"
         logger.info(
@@ -479,10 +437,9 @@ class ExperimentOrchestrator:
         )
 
         title_map = {
-            "EXP_001": "[2] EXPERIMENT 001: BASELINE (2026 Context)",
-            "EXP_002": "[3] EXPERIMENT 002: CONSERVATIVE PERSONA (2026 Context)",
-            "EXP_003": "[4] EXPERIMENT 003: CHAIN-OF-THOUGHT (2026 Context)",
-            "EXP_004": "[5] EXPERIMENT 004: BASELINE (2025 Context)",
+            "EXP_001": "[2] EXPERIMENT 001: BASELINE (Combined Context)",
+            "EXP_002": "[3] EXPERIMENT 002: CONSERVATIVE PERSONA (Combined Context)",
+            "EXP_003": "[4] EXPERIMENT 003: BASELINE TOP-K=3 (Combined Context)",
         }
 
         for idx, row in tqdm(
@@ -507,13 +464,15 @@ class ExperimentOrchestrator:
             ]
 
             for exp_id in exp_ids:
-                prompt, raw_res, decision, sources, reasoning = self._run_single_experiment(exp_id, row)
+                prompt, raw_res, decision, sources_str, reasoning = self._run_single_experiment(exp_id, row)
                 df_out.at[idx, f"{exp_id}_Decision"] = decision
+                df_out.at[idx, f"{exp_id}_Reasoning"] = reasoning
+                df_out.at[idx, f"{exp_id}_Retrieved_Policies"] = sources_str
                 
                 audit_chunks.extend([
                     f"----------------------------------------------------------------------",
                     f"{title_map.get(exp_id, exp_id)}",
-                    f"=> RETRIEVED SOURCES (Top-K={self._exp_top_k[exp_id]}): {sources}\n",
+                    f"=> RETRIEVED SOURCES (Top-K={self._exp_top_k[exp_id]}): {sources_str}\n",
                     f">>> EXACT PROMPT SENT TO LLM:\n{prompt}\n",
                     f"<<< RAW LLM RESPONSE (JSON):\n{raw_res}\n",
                     f"<<< REASONING:\n{reasoning}\n",

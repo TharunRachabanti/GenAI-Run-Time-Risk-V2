@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import docx  # python-docx
 
@@ -97,57 +97,54 @@ class PolicyDocumentParser:
             except RuntimeError as exc:
                 logger.warning("Skipping %s — %s", file_path.name, exc)
 
-    def retrieve_context(self, policy_year: int, top_k: int = 5) -> Tuple[str, List[str]]:
-        """Return concatenated policy text for the requested year.
+    def retrieve_context(self, top_k: int = 5) -> Tuple[str, List[Dict[str, Any]]]:
+        """Return concatenated policy text.
 
         Args:
-            policy_year (int): The four-digit policy year to retrieve.
             top_k (int): Maximum number of documents to retrieve.
 
         Returns:
-            Tuple[str, List[str]]: A tuple containing the concatenated text and list of retrieved filenames.
+            Tuple[str, List[Dict[str, Any]]]: A tuple containing the concatenated text and list of retrieved metadata.
         """
-        if not isinstance(policy_year, int) or policy_year <= 0:
-            raise ValueError(
-                f"policy_year must be a positive integer, got: {policy_year!r}"
-            )
+        matched_texts: List[str] = []
+        retrieved_metadata: List[Dict[str, Any]] = []
 
-        year_str = str(policy_year)
-        matched: List[str] = []
-        retrieved_filenames: List[str] = []
-
+        rank = 1
         for filename, text in sorted(self.documents.items()):
-            if year_str in filename:
-                header = (
-                    f"\n{'=' * 70}\n"
-                    f"POLICY DOCUMENT: {filename}\n"
-                    f"{'=' * 70}\n"
-                )
-                matched.append(header + text)
-                retrieved_filenames.append(filename)
-                logger.debug("  Retrieved: %s", filename)
-                if len(matched) == top_k:
-                    break
+            policy_id_version = filename.replace('.docx', '')
+            header = (
+                f"\n{'=' * 70}\n"
+                f"Rank {rank}: {policy_id_version}\n"
+                f"{'=' * 70}\n"
+            )
+            matched_texts.append(header + text)
+            retrieved_metadata.append({
+                "policy_id_version": policy_id_version,
+                "rank": rank,
+                "text": text
+            })
+            logger.debug("  Retrieved: %s (Rank %d)", filename, rank)
+            if len(matched_texts) == top_k:
+                break
+            rank += 1
 
-        if not matched:
+        if not matched_texts:
             logger.warning(
-                "No policy documents found for year %d. "
+                "No policy documents found. "
                 "Available filenames: %s",
-                policy_year,
                 list(self.documents.keys()),
             )
             return "", []
 
-        context = "\n\n".join(matched)
+        context = "\n\n".join(matched_texts)
         logger.info(
-            "Retrieved %d document(s) (Top-K=%d request) for policy year %d  "
+            "Retrieved %d document(s) (Top-K=%d request) "
             "(total context: %d chars)",
-            len(matched),
+            len(matched_texts),
             top_k,
-            policy_year,
             len(context),
         )
-        return context, retrieved_filenames
+        return context, retrieved_metadata
 
     def list_documents(self) -> List[str]:
         """Return a sorted list of all loaded document filenames.
