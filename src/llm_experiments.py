@@ -80,6 +80,32 @@ def _build_borrower_block(row: pd.Series) -> str:
     )
 
 
+_DECISION_RULES_BLOCK = """
+--- FINAL DECISION AGGREGATION RULES ---
+After classifying each metric into its risk tier using the Policy Context above, determine the Final Decision strictly using these rules in order:
+
+RULE 1:
+If PD = High AND any other metric = High
+-> DECLINE
+
+RULE 2:
+If two or more metrics = High
+-> DECLINE
+
+RULE 3:
+If exactly one metric = High
+-> APPROVE WITH CONDITIONS
+
+RULE 4:
+If no metric = High, but at least one metric = Enhanced Review / Elevated / Moderate
+-> APPROVE WITH CONDITIONS
+
+RULE 5:
+Otherwise (all metrics are Standard / Low)
+-> APPROVE
+--- END DECISION AGGREGATION RULES ---
+"""
+
 def _prompt_exp001(borrower_block: str, context: str) -> str:
     """Build the EXP-001 neutral baseline prompt.
 
@@ -95,6 +121,7 @@ def _prompt_exp001(borrower_block: str, context: str) -> str:
         "context below, evaluate the borrower and output your final decision "
         "as exactly one of: APPROVE, APPROVE WITH CONDITIONS, or DECLINE.\n\n"
         f"POLICY CONTEXT:\n{context}\n\n"
+        f"{_DECISION_RULES_BLOCK}\n\n"
         f"{borrower_block}\n\n"
         "Final Decision:"
     )
@@ -117,6 +144,7 @@ def _prompt_exp002(borrower_block: str, context: str) -> str:
         "output your final decision as exactly one of: APPROVE, APPROVE WITH "
         "CONDITIONS, or DECLINE.\n\n"
         f"POLICY CONTEXT:\n{context}\n\n"
+        f"{_DECISION_RULES_BLOCK}\n\n"
         f"{borrower_block}\n\n"
         "Final Decision:"
     )
@@ -140,6 +168,7 @@ def _prompt_exp003(borrower_block: str, context: str) -> str:
         "Do not write out verbose mathematical formulas or LaTeX. "
         "Output your FINAL_DECISION directly after your brief reasoning.\n\n"
         f"POLICY CONTEXT:\n{context}\n\n"
+        f"{_DECISION_RULES_BLOCK}\n\n"
         f"{borrower_block}\n\n"
         "Step-by-step analysis:"
     )
@@ -162,6 +191,7 @@ def _prompt_exp004(borrower_block: str, context: str) -> str:
         "context below, evaluate the borrower and output your final decision "
         "as exactly one of: APPROVE, APPROVE WITH CONDITIONS, or DECLINE.\n\n"
         f"POLICY CONTEXT:\n{context}\n\n"
+        f"{_DECISION_RULES_BLOCK}\n\n"
         f"{borrower_block}\n\n"
         "Final Decision:"
     )
