@@ -42,7 +42,7 @@ load_dotenv()
 #
 # Option A: Specify a list of specific Applicant IDs to test (e.g., ['P038', 'P040']).
 # If this is set to a list, the pipeline will only run those borrowers.
-TEST_BORROWER_IDS = ['P001', 'P038', 'P040', 'P042']
+TEST_BORROWER_IDS = ['P001']
 
 # Option B: If TEST_BORROWER_IDS is None or empty, it will select the first N borrowers.
 TEST_BORROWER_COUNT = 5
