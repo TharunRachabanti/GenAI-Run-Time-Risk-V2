@@ -84,6 +84,10 @@ llm:
 
 # ── Experiments ───────────────────────────────────────────────
 experiments:
+  top_k:
+    exp_001: 6
+    exp_002: 6
+    exp_003: 4
   policy_years:
     exp_001: 2026
     exp_002: 2026

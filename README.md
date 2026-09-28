@@ -109,9 +109,9 @@ Phase 2 compiles the precise string fragments surrounding crucial rules like "Ma
 Phase 3 merges the statistical dataset from Phase 1 (`GROUND_TRUTH_DECISION` row inputs) with the textual corpus of Phase 2 (Policy Context Text) to submit full dynamic prompt evaluations to Google Gemini. 
 
 ### The Three AI Experiments
-1. **EXP_001 (Baseline, Top-K=5):** Basic application metrics are fed in alongside up to 5 top retrieved combination policy docs. Evaluates Gemini's raw rule adherence capability.
-2. **EXP_002 (Conservative Persona, Top-K=5):** Hardcodes a professional frame demanding caution and structured thinking within the prompt design, analyzing risk tolerance alterations alongside 5 policy docs.
-3. **EXP_003 (Baseline, Top-K=3):** Utilizes the exact same neutral baseline prompt as EXP_001, but limits RAG extraction strictly to the Top 3 relevant policies to observe how reduced policy coverage impairs accurate decisioning.
+1. **EXP_001 (Baseline, Top-K=6):** Basic application metrics are fed in alongside up to 6 top retrieved combination policy docs. Evaluates Gemini's raw rule adherence capability.
+2. **EXP_002 (Conservative Persona, Top-K=6):** Hardcodes a professional frame demanding caution and structured thinking within the prompt design, analyzing risk tolerance alterations alongside 6 policy docs.
+3. **EXP_003 (Baseline, Top-K=4):** Utilizes the exact same neutral baseline prompt as EXP_001, but limits RAG extraction strictly to the Top 4 relevant policies to observe how reduced policy coverage impairs accurate decisioning.
 
 ### JSON Structured Output Engine
 All evaluations run through a rigidly defined Gemini `response_schema` utilizing standard `typing.TypedDict` and the `application/json` MIME-type.

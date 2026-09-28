@@ -253,8 +253,8 @@ class ExperimentOrchestrator:
         self.request_timeout: int   = int(llm_cfg["request_timeout"])
 
         # Pre-fetch contexts once (avoid re-concatenating per record)
-        ctx_top5, metadata_top5 = parser.retrieve_context(top_k=5)
-        ctx_top3, metadata_top3 = parser.retrieve_context(top_k=3)
+        ctx_top6, metadata_top6 = parser.retrieve_context(top_k=6)
+        ctx_top4, metadata_top4 = parser.retrieve_context(top_k=4)
 
         # Initialise LLM client
         self.model: Optional[Any] = None
@@ -265,15 +265,15 @@ class ExperimentOrchestrator:
 
         # Map each experiment to its context and sources
         self._exp_contexts: Dict[str, Tuple[str, List[Dict[str, Any]]]] = {
-            "EXP_001": (ctx_top5, metadata_top5),
-            "EXP_002": (ctx_top5, metadata_top5),
-            "EXP_003": (ctx_top3, metadata_top3),
+            "EXP_001": (ctx_top6, metadata_top6),
+            "EXP_002": (ctx_top6, metadata_top6),
+            "EXP_003": (ctx_top4, metadata_top4),
         }
         
         self._exp_top_k: Dict[str, int] = {
-            "EXP_001": 5,
-            "EXP_002": 5,
-            "EXP_003": 3,
+            "EXP_001": 6,
+            "EXP_002": 6,
+            "EXP_003": 4,
         }
 
     # Private helpers
@@ -439,7 +439,7 @@ class ExperimentOrchestrator:
         title_map = {
             "EXP_001": "[2] EXPERIMENT 001: BASELINE (Combined Context)",
             "EXP_002": "[3] EXPERIMENT 002: CONSERVATIVE PERSONA (Combined Context)",
-            "EXP_003": "[4] EXPERIMENT 003: BASELINE TOP-K=3 (Combined Context)",
+            "EXP_003": "[4] EXPERIMENT 003: BASELINE TOP-K=4 (Combined Context)",
         }
 
         for idx, row in tqdm(

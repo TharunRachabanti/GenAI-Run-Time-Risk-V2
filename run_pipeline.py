@@ -152,17 +152,17 @@ def run_phase2(cfg: Dict[str, Any], logger: logging.Logger) -> Any:
     t0 = time.time()
 
     parser = PolicyDocumentParser(cfg["paths"]["policy_docs_dir"])
-    ctx_2026, _ = parser.retrieve_context(2026)
-    ctx_2025, _ = parser.retrieve_context(2025)
+    ctx_top6, _ = parser.retrieve_context(top_k=6)
+    ctx_top4, _ = parser.retrieve_context(top_k=4)
     elapsed = time.time() - t0
 
     logger.info(
         "Parsed %d documents in %.1f s.", len(parser.documents), elapsed
     )
     logger.info(
-        "  2026 context length: %d chars | 2025 context length: %d chars",
-        len(ctx_2026),
-        len(ctx_2025),
+        "  Top-K=6 context length: %d chars | Top-K=4 context length: %d chars",
+        len(ctx_top6),
+        len(ctx_top4),
     )
     return parser
 
