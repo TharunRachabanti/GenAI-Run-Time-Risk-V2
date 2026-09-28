@@ -68,14 +68,10 @@ def _build_borrower_block(row: pd.Series) -> str:
     return (
         f"--- BORROWER PROFILE ---\n"
         f"Applicant ID                  : {applicant_id}\n"
-        f"Annual Income                 : {row['Income']:,.2f}\n"
-        f"Loan Amount                   : {row['Loan_Amount']:,.2f}\n"
-        f"Annuity Payment               : {row['Annuity_Payment']:,.2f}\n"
-        f"Goods Price                   : {row['Goods_Price']:,.2f}\n"
-        f"Payment-to-Income Ratio (PTI) : {row['PTI']}%\n"
-        f"Credit-to-Income Ratio (CTI)  : {row['CTI']}x\n"
-        f"Loan-to-Goods-Value (LGV)     : {row['LGV']}%\n"
-        f"Probability of Default (PD)   : {row['FROZEN_PD']}%\n"
+        f"Payment-to-Income Ratio (PTI) : {row['PTI']:.2f}%\n"
+        f"Credit-to-Income Ratio (CTI)  : {row['CTI']:.2f}x\n"
+        f"Loan-to-Goods-Value (LGV)     : {row['LGV']:.2f}%\n"
+        f"Probability of Default (PD)   : {row['FROZEN_PD']:.2f}%\n"
         f"--- END BORROWER PROFILE ---"
     )
 
