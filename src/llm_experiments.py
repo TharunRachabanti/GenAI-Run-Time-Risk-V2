@@ -195,6 +195,40 @@ def _init_gemini(model_name: str) -> Any:
     logger.info("Gemini API configured with model: %s", model_name)
     return genai.GenerativeModel(model_name)
 
+
+def _classify_metric(metric: str, value: float, retrieved_version: str) -> str:
+    if retrieved_version == "NULL":
+        return "Unavailable"
+    
+    if metric == "pti":
+        if retrieved_version == "2026.1":
+            if value <= 20: return "Standard"
+            elif value <= 30: return "Enhanced Review"
+            else: return "High"
+        elif retrieved_version == "2025.1":
+            if value <= 25: return "Standard"
+            elif value <= 35: return "Enhanced Review"
+            else: return "High"
+    elif metric == "cti":
+        if retrieved_version == "2026.1":
+            if value <= 3.0: return "Standard"
+            elif value <= 5.0: return "Enhanced Review"
+            else: return "High"
+        elif retrieved_version == "2025.1":
+            if value <= 4.0: return "Standard"
+            elif value <= 6.0: return "Enhanced Review"
+            else: return "High"
+    elif metric == "lgv":
+        if value <= 100: return "Standard"
+        elif value <= 110: return "Enhanced Review"
+        else: return "High"
+    elif metric == "pd":
+        if value < 2: return "Low"
+        elif value < 5: return "Moderate"
+        elif value < 7: return "Elevated"
+        else: return "High"
+    return "Unavailable"
+
 def _save_excel(df: pd.DataFrame, csv_path: str) -> None:
     """Save the DataFrame to a nicely formatted Excel workbook alongside the CSV."""
     import openpyxl
@@ -251,6 +285,8 @@ def _save_excel(df: pd.DataFrame, csv_path: str) -> None:
                 # Apply alignment
                 if col_name and (col_name.endswith("_Decision") or col_name == "GROUND_TRUTH_DECISION" or col_name.endswith("_ID") or cell.column <= 5):
                     cell.alignment = center_align
+                elif col_name and (col_name.endswith("_value") or col_name.endswith("_policy_retrieved") or col_name.endswith("_policy_version") or col_name.endswith("_classification")):
+                    cell.alignment = center_align
                 else:
                     cell.alignment = body_align
                 
@@ -262,6 +298,11 @@ def _save_excel(df: pd.DataFrame, csv_path: str) -> None:
                         cell.fill = color_cond
                     elif cell.value == "DECLINE":
                         cell.fill = color_decline
+                
+                if cell.value in ["No", "NULL", "Unavailable"]:
+                    if col_name and (col_name.endswith("_policy_retrieved") or col_name.endswith("_policy_version") or col_name.endswith("_classification")):
+                        cell.fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+                        cell.font = Font(bold=True)
                         
                 if cell.value and isinstance(cell.value, str):
                     lines = cell.value.count('\n') + 1
@@ -278,6 +319,8 @@ def _save_excel(df: pd.DataFrame, csv_path: str) -> None:
                 ws.column_dimensions[col_letter].width = 50
             elif col_name and col_name.endswith("_Decision") or col_name == "GROUND_TRUTH_DECISION":
                 ws.column_dimensions[col_letter].width = 26
+            elif col_name and (col_name.endswith("_value") or col_name.endswith("_policy_retrieved") or col_name.endswith("_policy_version") or col_name.endswith("_classification")):
+                ws.column_dimensions[col_letter].width = 20
             else:
                 ws.column_dimensions[col_letter].width = 16
 
@@ -405,7 +448,7 @@ class ExperimentOrchestrator:
         self,
         exp_id: str,
         row: pd.Series,
-    ) -> Tuple[str, str, str, str, str]:
+    ) -> Tuple[str, str, str, str, str, List[Dict[str, Any]]]:
         """Execute one experiment for a single borrower row.
 
         Args:
@@ -430,7 +473,7 @@ class ExperimentOrchestrator:
         sources_str = "\n".join(sources_str_parts)
 
         if self.dry_run:
-            return prompt, "", SKIPPED, sources_str, ""
+            return prompt, "", SKIPPED, sources_str, "", []
 
         try:
             raw_response = self._call_llm(prompt)
@@ -455,7 +498,7 @@ class ExperimentOrchestrator:
                     exp_id,
                     raw_response,
                 )
-            return prompt, raw_response, decision, sources_str, reasoning
+            return prompt, raw_response, decision, sources_str, reasoning, sources_meta
         except RuntimeError as exc:
             logger.error(
                 "%s | %s — API error: %s",
@@ -463,7 +506,7 @@ class ExperimentOrchestrator:
                 exp_id,
                 exc,
             )
-            return prompt, f"ERROR: {exc}", "API_ERROR", sources_str, ""
+            return prompt, f"ERROR: {exc}", "API_ERROR", sources_str, "", sources_meta
 
     # Public API
 
@@ -502,10 +545,34 @@ class ExperimentOrchestrator:
 
         # Prepare output DataFrame
         df_out = df.copy()
+        if "Historical_Data_ID" in df_out.columns:
+            df_out.rename(columns={"Historical_Data_ID": "Historical_ID"}, inplace=True)
+            
+        final_column_order = [
+            "Applicant_ID", "Historical_ID", "Income", "Loan_Amount", "Annuity_Payment", 
+            "Goods_Price", "Gender", "Education", "Family_Status", "Income_Type", 
+            "Occupation", "Housing_Type", "Owns_Car", "Owns_Realty", "Age", "Years_Employed",
+            
+            "PTI", "CTI", "LGV", "FROZEN_PD", "PTI_RISK", "CTI_RISK", "LGV_RISK", "PD_RISK", "GROUND_TRUTH_DECISION"
+        ]
+        
         for exp_id in exp_ids:
-            df_out[f"{exp_id}_Decision"] = pd.Series(dtype=str)
-            df_out[f"{exp_id}_Reasoning"] = pd.Series(dtype=str)
-            df_out[f"{exp_id}_Retrieved_Policies"] = pd.Series(dtype=str)
+            for m in ["pti", "cti", "lgv", "pd"]:
+                final_column_order.extend([
+                    f"{exp_id}_{m}_value",
+                    f"{exp_id}_{m}_policy_retrieved",
+                    f"{exp_id}_{m}_policy_version",
+                    f"{exp_id}_{m}_classification"
+                ])
+            final_column_order.extend([
+                f"{exp_id}_Decision",
+                f"{exp_id}_Reasoning",
+                f"{exp_id}_Retrieved_Policies"
+            ])
+            
+        for col in final_column_order:
+            if col not in df_out.columns:
+                df_out[col] = pd.Series(dtype=str)
 
         mode_label = "DRY RUN" if self.dry_run else f"API ({self.model_name})"
         logger.info(
@@ -529,7 +596,7 @@ class ExperimentOrchestrator:
             ncols=90,
         ):
             app_id = row.get("Applicant_ID", "N/A")
-            hist_id = row.get("Historical_Data_ID", "N/A")
+            hist_id = row.get("Historical_ID", row.get("Historical_Data_ID", "N/A"))
             
             audit_chunks = [
                 f"======================================================================",
@@ -543,7 +610,36 @@ class ExperimentOrchestrator:
             ]
 
             for exp_id in exp_ids:
-                prompt, raw_res, decision, sources_str, reasoning = self._run_single_experiment(exp_id, row)
+                prompt, raw_res, decision, sources_str, reasoning, sources_meta = self._run_single_experiment(exp_id, row)
+
+                for m_key, pol_prefix, m_raw, m_fmt in [
+                    ("pti", "POL-01", row.get("PTI", 0), f"{row.get('PTI', 0):.1f}%"),
+                    ("cti", "POL-02", row.get("CTI", 0), f"{row.get('CTI', 0):.1f}x"),
+                    ("lgv", "POL-03", row.get("LGV", 0), f"{row.get('LGV', 0):.1f}%"),
+                    ("pd", "POL-04", row.get("FROZEN_PD", 0), f"{row.get('FROZEN_PD', 0):.2f}%")
+                ]:
+                    retrieved_version = "NULL"
+                    policy_retrieved = "No"
+                    versions_found = []
+                    for sm in sources_meta:
+                        if pol_prefix in sm['policy_id_version']:
+                            if "2026.1" in sm['policy_id_version']:
+                                versions_found.append("2026.1")
+                            elif "2025.1" in sm['policy_id_version']:
+                                versions_found.append("2025.1")
+                    
+                    if "2026.1" in versions_found:
+                        retrieved_version = "2026.1"
+                        policy_retrieved = "Yes"
+                    elif "2025.1" in versions_found:
+                        retrieved_version = "2025.1"
+                        policy_retrieved = "Yes"
+
+                    df_out.at[idx, f"{exp_id}_{m_key}_value"] = m_fmt
+                    df_out.at[idx, f"{exp_id}_{m_key}_policy_retrieved"] = policy_retrieved
+                    df_out.at[idx, f"{exp_id}_{m_key}_policy_version"] = retrieved_version
+                    df_out.at[idx, f"{exp_id}_{m_key}_classification"] = _classify_metric(m_key, float(m_raw), retrieved_version)
+
                 df_out.at[idx, f"{exp_id}_Decision"] = decision
                 df_out.at[idx, f"{exp_id}_Reasoning"] = reasoning
                 df_out.at[idx, f"{exp_id}_Retrieved_Policies"] = sources_str
@@ -572,6 +668,9 @@ class ExperimentOrchestrator:
                     _save_excel(df_out, output_csv_path)
                 except PermissionError:
                     logger.warning("CSV is currently open in Excel; keeping results in memory and will update once closed.")
+
+        # Reorder dataframe enforcing strictly required layout
+        df_out = df_out[[c for c in final_column_order if c in df_out.columns]]
 
         # Log decision distributions per experiment
         for exp_id in exp_ids:
