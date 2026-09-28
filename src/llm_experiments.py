@@ -199,6 +199,73 @@ def _init_gemini(model_name: str) -> Any:
     logger.info("Gemini API configured with model: %s", model_name)
     return genai.GenerativeModel(model_name)
 
+def _save_excel(df: pd.DataFrame, csv_path: str) -> None:
+    """Save the DataFrame to a nicely formatted Excel workbook alongside the CSV."""
+    import openpyxl
+    from openpyxl.styles import PatternFill, Font, Alignment
+    
+    excel_path = csv_path.replace(".csv", ".xlsx")
+    try:
+        # Use openpyxl via pandas first to just dump data
+        with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Results")
+        
+        # Now reopen with openpyxl to apply formatting
+        wb = openpyxl.load_workbook(excel_path)
+        ws = wb["Results"]
+        
+        # 1. Header row
+        header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True)
+        header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_align
+            
+        ws.freeze_panes = "A2"
+        
+        # Body cells alignment
+        body_align = Alignment(wrap_text=True, vertical="top")
+        
+        # Colors for Decision columns
+        color_approve = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+        color_cond = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+        color_decline = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+
+        decision_cols = ["GROUND_TRUTH_DECISION", "EXP_001_Decision", "EXP_002_Decision", "EXP_003_Decision"]
+        col_name_to_idx = {cell.value: idx for idx, cell in enumerate(ws[1], 1)}
+        
+        for row in ws.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = body_align
+                
+                # Check if it's a decision column
+                col_name = ws.cell(row=1, column=cell.column).value
+                if col_name in decision_cols:
+                    if cell.value == "APPROVE":
+                        cell.fill = color_approve
+                    elif cell.value == "APPROVE WITH CONDITIONS":
+                        cell.fill = color_cond
+                    elif cell.value == "DECLINE":
+                        cell.fill = color_decline
+
+        # Set Column Widths
+        for col_name, idx in col_name_to_idx.items():
+            col_letter = openpyxl.utils.get_column_letter(idx)
+            if col_name and col_name.endswith("_Reasoning"):
+                ws.column_dimensions[col_letter].width = 55
+            elif col_name and col_name.endswith("_Retrieved_Policies"):
+                ws.column_dimensions[col_letter].width = 50
+            elif col_name and col_name.endswith("_Decision") or col_name == "GROUND_TRUTH_DECISION":
+                ws.column_dimensions[col_letter].width = 26
+            else:
+                ws.column_dimensions[col_letter].width = 16
+
+        wb.save(excel_path)
+    except Exception as e:
+        logger.warning(f"Failed to format Excel file {excel_path}: {e}")
 
 # Experiment Orchestrator
 
@@ -252,23 +319,12 @@ class ExperimentOrchestrator:
         self.max_tokens:      int   = int(llm_cfg["max_tokens"])
         self.request_timeout: int   = int(llm_cfg["request_timeout"])
 
-        # Pre-fetch contexts once (avoid re-concatenating per record)
-        ctx_top6, metadata_top6 = parser.retrieve_context(top_k=6)
-        ctx_top4, metadata_top4 = parser.retrieve_context(top_k=4)
-
         # Initialise LLM client
         self.model: Optional[Any] = None
         if not self.dry_run:
             self.model = _init_gemini(self.model_name)
         else:
             logger.info("ExperimentOrchestrator: dry_run=True — LLM calls skipped.")
-
-        # Map each experiment to its context and sources
-        self._exp_contexts: Dict[str, Tuple[str, List[Dict[str, Any]]]] = {
-            "EXP_001": (ctx_top6, metadata_top6),
-            "EXP_002": (ctx_top6, metadata_top6),
-            "EXP_003": (ctx_top4, metadata_top4),
-        }
         
         self._exp_top_k: Dict[str, int] = {
             "EXP_001": 6,
@@ -342,13 +398,19 @@ class ExperimentOrchestrator:
             Tuple of (prompt, raw_response, extracted_decision, retrieved_sources, reasoning).
         """
         borrower_block = _build_borrower_block(row)
-        context, sources_meta = self._exp_contexts[exp_id]
+        top_k = self._exp_top_k[exp_id]
+        context, sources_meta = self.parser.retrieve_context(top_k=top_k, borrower_row=row)
         prompt_fn = _PROMPT_BUILDERS[exp_id]
         prompt = prompt_fn(borrower_block, context)
         
-        sources_str = " | ".join([
-            f"Rank {m['rank']}: {m['policy_id_version']}" for m in sources_meta
-        ])
+        sources_str_parts = []
+        for m in sources_meta:
+            score_str = f"Score: {m['score']:.4f}" if 'score' in m else ""
+            match_str = f"Matched: {', '.join(m.get('reason', []))}" if 'reason' in m else ""
+            bracket_content = " | ".join(filter(bool, [score_str, match_str]))
+            sources_str_parts.append(f"Rank {m['rank']}: {m['policy_id_version']} [{bracket_content}]")
+        
+        sources_str = "\n".join(sources_str_parts)
 
         if self.dry_run:
             return prompt, "", SKIPPED, sources_str, ""
@@ -472,7 +534,7 @@ class ExperimentOrchestrator:
                 audit_chunks.extend([
                     f"----------------------------------------------------------------------",
                     f"{title_map.get(exp_id, exp_id)}",
-                    f"=> RETRIEVED SOURCES (Top-K={self._exp_top_k[exp_id]}): {sources_str}\n",
+                    f"=> RETRIEVED SOURCES (Top-K={self._exp_top_k[exp_id]}):\n{sources_str}\n",
                     f">>> EXACT PROMPT SENT TO LLM:\n{prompt}\n",
                     f"<<< RAW LLM RESPONSE (JSON):\n{raw_res}\n",
                     f"<<< REASONING:\n{reasoning}\n",
@@ -490,6 +552,7 @@ class ExperimentOrchestrator:
             if output_csv_path:
                 try:
                     df_out.to_csv(output_csv_path, index=False)
+                    _save_excel(df_out, output_csv_path)
                 except PermissionError:
                     logger.warning("CSV is currently open in Excel; keeping results in memory and will update once closed.")
 

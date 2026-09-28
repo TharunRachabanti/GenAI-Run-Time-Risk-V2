@@ -8,6 +8,10 @@ from typing import Dict, List, Optional, Tuple, Any
 
 import docx  # python-docx
 
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,21 +101,79 @@ class PolicyDocumentParser:
             except RuntimeError as exc:
                 logger.warning("Skipping %s — %s", file_path.name, exc)
 
-    def retrieve_context(self, top_k: int = 5) -> Tuple[str, List[Dict[str, Any]]]:
-        """Return concatenated policy text.
+    def retrieve_context(self, top_k: int = 5, borrower_row: Optional[pd.Series] = None) -> Tuple[str, List[Dict[str, Any]]]:
+        """Return concatenated policy text ranked dynamically by TF-IDF similarity.
 
         Args:
             top_k (int): Maximum number of documents to retrieve.
+            borrower_row (Optional[pd.Series]): Row of metrics to create scoring context.
 
         Returns:
             Tuple[str, List[Dict[str, Any]]]: A tuple containing the concatenated text and list of retrieved metadata.
         """
+        if not self.documents:
+            logger.warning("No policy documents found.")
+            return "", []
+
+        # Construct query from borrower or fallback
+        if borrower_row is not None:
+            terms = [
+                str(borrower_row.get("Income", "")),
+                str(borrower_row.get("Loan_Amount", "")),
+                str(borrower_row.get("Annuity_Payment", "")),
+                str(borrower_row.get("Goods_Price", "")),
+                "pti", "cti", "lgv", "pd",
+                "income", "loan", "annuity", "goods", "payment", "ratio", "default", "probability", "value",
+                str(borrower_row.get("PTI_RISK", "")),
+                str(borrower_row.get("LGV_RISK", "")),
+                str(borrower_row.get("PD_RISK", ""))
+            ]
+            query = " ".join([t for t in terms if t.strip()])
+        else:
+            query = "credit risk policy affordability exposure financing value probability of default"
+
+        doc_keys = list(self.documents.keys())
+        doc_texts = [self.documents[k] for k in doc_keys]
+
+        # TF-IDF Retrieval
+        vectorizer = TfidfVectorizer(stop_words='english')
+        tfidf_matrix = vectorizer.fit_transform(doc_texts + [query])
+        
+        doc_vectors = tfidf_matrix[:-1]
+        query_vector = tfidf_matrix[-1]
+        similarities = cosine_similarity(query_vector, doc_vectors)[0]
+
+        # Rank documents by highest cosine similarity
+        ranked_indices = similarities.argsort()[::-1]
+        feature_names = vectorizer.get_feature_names_out()
+
         matched_texts: List[str] = []
         retrieved_metadata: List[Dict[str, Any]] = []
 
         rank = 1
-        for filename, text in sorted(self.documents.items()):
-            policy_id_version = filename.replace('.docx', '')
+        for idx in ranked_indices:
+            if rank > top_k:
+                break
+            
+            filename = doc_keys[idx]
+            text = doc_texts[idx]
+            score = float(similarities[idx])
+            
+            # Extract top contributing terms for this document relating to the query
+            # We multiply doc vector by query vector to find overlapping terms
+            overlap = doc_vectors[idx].multiply(query_vector).toarray()[0]
+            top_term_indices = overlap.argsort()[::-1][:4] # Top 4 terms
+            matched_terms = [feature_names[i] for i in top_term_indices if overlap[i] > 0]
+            if not matched_terms:
+                matched_terms = ["generic match"]
+
+            # Clean name e.g., POL-01_2025-1_Affordability_Policy -> POL-01 (v2025.1) - Affordability Policy
+            name_parts = filename.replace('.docx', '').split('_', 2)
+            if len(name_parts) >= 3:
+                policy_id_version = f"{name_parts[0]} (v{name_parts[1].replace('-', '.')}) - {name_parts[2].replace('_', ' ')}"
+            else:
+                policy_id_version = filename.replace('.docx', '')
+
             header = (
                 f"\n{'=' * 70}\n"
                 f"Rank {rank}: {policy_id_version}\n"
@@ -121,20 +183,12 @@ class PolicyDocumentParser:
             retrieved_metadata.append({
                 "policy_id_version": policy_id_version,
                 "rank": rank,
-                "text": text
+                "text": text,
+                "score": round(score, 4),
+                "reason": matched_terms
             })
-            logger.debug("  Retrieved: %s (Rank %d)", filename, rank)
-            if len(matched_texts) == top_k:
-                break
+            logger.debug("  Retrieved: %s (Rank %d, Score: %.4f)", filename, rank, score)
             rank += 1
-
-        if not matched_texts:
-            logger.warning(
-                "No policy documents found. "
-                "Available filenames: %s",
-                list(self.documents.keys()),
-            )
-            return "", []
 
         context = "\n\n".join(matched_texts)
         logger.info(
