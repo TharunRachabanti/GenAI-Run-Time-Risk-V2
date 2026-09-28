@@ -202,7 +202,7 @@ def _init_gemini(model_name: str) -> Any:
 def _save_excel(df: pd.DataFrame, csv_path: str) -> None:
     """Save the DataFrame to a nicely formatted Excel workbook alongside the CSV."""
     import openpyxl
-    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
     
     excel_path = csv_path.replace(".csv", ".xlsx")
     try:
@@ -219,15 +219,22 @@ def _save_excel(df: pd.DataFrame, csv_path: str) -> None:
         header_font = Font(color="FFFFFF", bold=True)
         header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
         
+        thin_border = Border(left=Side(style='thin', color='D9D9D9'),
+                             right=Side(style='thin', color='D9D9D9'),
+                             top=Side(style='thin', color='D9D9D9'),
+                             bottom=Side(style='thin', color='D9D9D9'))
+        
         for cell in ws[1]:
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = header_align
+            cell.border = thin_border
             
         ws.freeze_panes = "A2"
         
-        # Body cells alignment
-        body_align = Alignment(wrap_text=True, vertical="top")
+        # Body cells alignment and borders
+        body_align = Alignment(wrap_text=True, vertical="top", horizontal="left")
+        center_align = Alignment(wrap_text=True, vertical="top", horizontal="center")
         
         # Colors for Decision columns
         color_approve = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
@@ -238,11 +245,20 @@ def _save_excel(df: pd.DataFrame, csv_path: str) -> None:
         col_name_to_idx = {cell.value: idx for idx, cell in enumerate(ws[1], 1)}
         
         for row in ws.iter_rows(min_row=2):
+            max_lines_in_row = 1
             for cell in row:
-                cell.alignment = body_align
+                col_name = ws.cell(row=1, column=cell.column).value
+                
+                # Apply borders
+                cell.border = thin_border
+                
+                # Apply alignment
+                if col_name and (col_name.endswith("_Decision") or col_name == "GROUND_TRUTH_DECISION" or col_name.endswith("_ID") or cell.column <= 5):
+                    cell.alignment = center_align
+                else:
+                    cell.alignment = body_align
                 
                 # Check if it's a decision column
-                col_name = ws.cell(row=1, column=cell.column).value
                 if col_name in decision_cols:
                     if cell.value == "APPROVE":
                         cell.fill = color_approve
@@ -250,6 +266,12 @@ def _save_excel(df: pd.DataFrame, csv_path: str) -> None:
                         cell.fill = color_cond
                     elif cell.value == "DECLINE":
                         cell.fill = color_decline
+                        
+                if cell.value and isinstance(cell.value, str):
+                    lines = cell.value.count('\n') + 1
+                    if lines > max_lines_in_row:
+                        max_lines_in_row = lines
+            ws.row_dimensions[row[0].row].height = max_lines_in_row * 16 + 10
 
         # Set Column Widths
         for col_name, idx in col_name_to_idx.items():
@@ -405,10 +427,9 @@ class ExperimentOrchestrator:
         
         sources_str_parts = []
         for m in sources_meta:
-            score_str = f"Score: {m['score']:.4f}" if 'score' in m else ""
-            match_str = f"Matched: {', '.join(m.get('reason', []))}" if 'reason' in m else ""
-            bracket_content = " | ".join(filter(bool, [score_str, match_str]))
-            sources_str_parts.append(f"Rank {m['rank']}: {m['policy_id_version']} [{bracket_content}]")
+            score_str = m.get('score', 0.0)
+            reason_str = m.get('reason', '')
+            sources_str_parts.append(f"Rank {m['rank']}: {m['policy_id_version']} [Score: {score_str:.4f}] -> Why: {reason_str}")
         
         sources_str = "\n".join(sources_str_parts)
 

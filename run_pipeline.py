@@ -188,7 +188,7 @@ def run_phase3(
     Returns:
         Any: Final results DataFrame with all experiment columns.
     """
-    from src.llm_experiments import ExperimentOrchestrator
+    from src.llm_experiments import ExperimentOrchestrator, _save_excel
 
     import datetime
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -222,7 +222,9 @@ def run_phase3(
     while True:
         try:
             df_results.to_csv(out_path, index=False)
-            logger.info("  ✔ Saved results → %s  (%d rows)", out_path, len(df_results))
+            _save_excel(df_results, str(out_path))
+            logger.info("  ✔ Saved results CSV → %s  (%d rows)", out_path, len(df_results))
+            logger.info("  ✔ Saved formatted Excel → %s", str(out_path).replace('.csv', '.xlsx'))
             break
         except PermissionError:
             logger.warning("CSV is currently open in Excel. Please close it so we can write the final results. Retrying in 5 seconds...")
