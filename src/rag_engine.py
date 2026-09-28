@@ -118,15 +118,12 @@ class PolicyDocumentParser:
         # Construct query from borrower or fallback
         if borrower_row is not None:
             terms = [
+                "amt_income_total", "amt_credit", "amt_annuity", "amt_goods_price",
+                "pti", "cti", "lgv", "pd",
                 str(borrower_row.get("Income", "")),
                 str(borrower_row.get("Loan_Amount", "")),
                 str(borrower_row.get("Annuity_Payment", "")),
-                str(borrower_row.get("Goods_Price", "")),
-                "pti", "cti", "lgv", "pd",
-                "income", "loan", "annuity", "goods", "payment", "ratio", "default", "probability", "value",
-                str(borrower_row.get("PTI_RISK", "")),
-                str(borrower_row.get("LGV_RISK", "")),
-                str(borrower_row.get("PD_RISK", ""))
+                str(borrower_row.get("Goods_Price", ""))
             ]
             query = " ".join([t for t in terms if t.strip()])
         else:
@@ -144,16 +141,27 @@ class PolicyDocumentParser:
         similarities = cosine_similarity(query_vector, doc_vectors)[0]
 
         # Rank documents by highest cosine similarity
-        boost_schema = {
-            "POL-01": {"metric": "PTI", "risk_col": "PTI_RISK", "metric_name": "PTI", "rules": {"High": (0.5, ">30%"), "Enhanced Review": (0.3, ">20% to <=30%")}},
-            "POL-02": {"metric": "CTI", "risk_col": "CTI_RISK", "metric_name": "CTI", "rules": {"High": (0.5, ">5.0x"), "Enhanced Review": (0.3, ">3.0x to <=5.0x")}},
-            "POL-03": {"metric": "LGV", "risk_col": "LGV_RISK", "metric_name": "LGV", "rules": {"High": (0.5, ">110%"), "Enhanced Review": (0.3, ">100% to <=110%")}},
-            "POL-04": {"metric": "PD", "risk_col": "PD_RISK", "metric_name": "PD", "rules": {"High": (0.5, ">=7%"), "Elevated": (0.4, ">=5% to <7%"), "Moderate": (0.2, ">=2% to <5%")}}
-        }
+        ranked_indices = similarities.argsort()[::-1]
+        feature_names = vectorizer.get_feature_names_out()
 
-        scored_docs = []
-        for idx, filename in enumerate(doc_keys):
+        matched_texts: List[str] = []
+        retrieved_metadata: List[Dict[str, Any]] = []
+
+        rank = 1
+        for idx in ranked_indices:
+            if rank > top_k:
+                break
+            
+            filename = doc_keys[idx]
+            text = doc_texts[idx]
             score = float(similarities[idx])
+            
+            overlap = doc_vectors[idx].multiply(query_vector).toarray()[0]
+            top_term_indices = overlap.argsort()[::-1][:3] # Top 3 terms
+            matched_terms = [feature_names[i] for i in top_term_indices if overlap[i] > 0]
+            if not matched_terms:
+                matched_terms = ["generic match"]
+
             name_parts = filename.replace('.docx', '').split('_', 2)
             if len(name_parts) >= 3:
                 pol_prefix = name_parts[0]
@@ -164,59 +172,35 @@ class PolicyDocumentParser:
                 version_str = "UNKNOWN"
                 policy_id_version = filename.replace('.docx', '')
 
-            combined_score = score
-            reason_str = ""
-
             if borrower_row is not None:
                 if "2026" in version_str:
-                    combined_score += 0.05
-                    version_context = "ranked above v2025.1 as the active 2026 policy"
+                    version_context = f"active {version_str.replace('-', '.')} version"
                 elif "2025" in version_str:
-                    combined_score -= 0.05
-                    version_context = "historical 2025 policy"
+                    version_context = f"duplicate {version_str.replace('-', '.')} version consuming a Top-K slot"
                 else:
-                    version_context = ""
+                    version_context = f"version {version_str.replace('-', '.')}"
 
-                if pol_prefix in boost_schema:
-                    schema = boost_schema[pol_prefix]
-                    risk_val = borrower_row.get(schema['risk_col'])
-                    metric_raw = borrower_row.get(schema['metric'])
-                    
-                    if schema['metric_name'] in ['PTI', 'LGV', 'PD']:
-                        metric_val = f"{metric_raw}%"
-                    elif schema['metric_name'] == 'CTI':
-                        metric_val = f"{metric_raw}x"
-                    else:
-                        metric_val = str(metric_raw)
-                    
-                    if risk_val in schema['rules']:
-                        boost, desc = schema['rules'][risk_val]
-                        combined_score += boost
-                        reason_str = f"Borrower's {schema['metric_name']} is {metric_val} ({risk_val} Risk), directly triggering {pol_prefix}'s risk tier ({desc})."
-                    else:
-                        if risk_val in ["Standard", "Low"]:
-                            reason_str = f"Borrower's {schema['metric_name']} is {metric_val} ({risk_val} Risk); {version_context}."
-                        else:
-                            reason_str = f"Borrower's {schema['metric_name']} is {metric_val} ({risk_val} Risk)."
+                metric_val = ""
+                if "POL-01" in pol_prefix:
+                    val = next((borrower_row.get(k) for k in ["PTI", "pti"] if pd.notna(borrower_row.get(k))), "")
+                    metric_val = f"Borrower PTI = {val}%"
+                elif "POL-02" in pol_prefix:
+                    val = next((borrower_row.get(k) for k in ["CTI", "cti"] if pd.notna(borrower_row.get(k))), "")
+                    metric_val = f"Borrower CTI = {val}x"
+                elif "POL-03" in pol_prefix:
+                    val = next((borrower_row.get(k) for k in ["LGV", "lgv"] if pd.notna(borrower_row.get(k))), "")
+                    metric_val = f"Borrower LGV = {val}%"
+                elif "POL-04" in pol_prefix:
+                    val = next((borrower_row.get(k) for k in ["FROZEN_PD", "PD", "pd"] if pd.notna(borrower_row.get(k))), "")
+                    metric_val = f"Borrower PD = {val}%"
                 else:
-                    reason_str = "Matched by semantic similarity."
+                    metric_val = "Unknown metric"
+
+                matched_str = f"[{', '.join(matched_terms)}]"
+                reason_str = f"Ranked #{rank} via natural TF-IDF match on {matched_str} for {metric_val} ({version_context})."
             else:
                 reason_str = "Matched by semantic similarity."
 
-            scored_docs.append((idx, combined_score, score, reason_str, policy_id_version))
-
-        scored_docs.sort(key=lambda x: x[1], reverse=True)
-
-        matched_texts: List[str] = []
-        retrieved_metadata: List[Dict[str, Any]] = []
-
-        rank = 1
-        for idx, combined_score, base_score, reason_str, policy_id_version in scored_docs:
-            if rank > top_k:
-                break
-            
-            filename = doc_keys[idx]
-            text = doc_texts[idx]
             
             header = (
                 f"\n{'=' * 70}\n"
@@ -228,10 +212,10 @@ class PolicyDocumentParser:
                 "policy_id_version": policy_id_version,
                 "rank": rank,
                 "text": text,
-                "score": round(base_score, 4),
+                "score": round(score, 4),
                 "reason": reason_str
             })
-            logger.debug("  Retrieved: %s (Rank %d, Base Score: %.4f, Combined: %.4f)", filename, rank, base_score, combined_score)
+            logger.debug("  Retrieved: %s (Rank %d, Score: %.4f)", filename, rank, score)
             rank += 1
 
         context = "\n\n".join(matched_texts)
