@@ -47,11 +47,21 @@ class PolicyDocumentParser:
                 f"No .docx files found in: {self.docs_dir}"
             )
 
+        self._init_tfidf()
+
         logger.info(
             "PolicyDocumentParser ready — %d documents loaded from %s",
             len(self.documents),
             self.docs_dir,
         )
+
+    def _init_tfidf(self) -> None:
+        """Pre-compute the TF-IDF matrix for all documents."""
+        self.doc_keys = list(self.documents.keys())
+        self.doc_texts = [self.documents[k] for k in self.doc_keys]
+        self.vectorizer = TfidfVectorizer(stop_words='english')
+        self.doc_vectors = self.vectorizer.fit_transform(self.doc_texts)
+        self.feature_names = self.vectorizer.get_feature_names_out()
 
     def _extract_text(self, docx_path: Path) -> str:
         """Extract all paragraph text from a single .docx file.
@@ -129,20 +139,12 @@ class PolicyDocumentParser:
         else:
             query = "credit risk policy affordability exposure financing value probability of default"
 
-        doc_keys = list(self.documents.keys())
-        doc_texts = [self.documents[k] for k in doc_keys]
-
-        # TF-IDF Retrieval
-        vectorizer = TfidfVectorizer(stop_words='english')
-        tfidf_matrix = vectorizer.fit_transform(doc_texts + [query])
-        
-        doc_vectors = tfidf_matrix[:-1]
-        query_vector = tfidf_matrix[-1]
-        similarities = cosine_similarity(query_vector, doc_vectors)[0]
+        # TF-IDF Retrieval using pre-computed vectorizer
+        query_vector = self.vectorizer.transform([query])
+        similarities = cosine_similarity(query_vector, self.doc_vectors)[0]
 
         # Rank documents by highest cosine similarity
         ranked_indices = similarities.argsort()[::-1]
-        feature_names = vectorizer.get_feature_names_out()
 
         matched_texts: List[str] = []
         retrieved_metadata: List[Dict[str, Any]] = []
@@ -152,13 +154,13 @@ class PolicyDocumentParser:
             if rank > top_k:
                 break
             
-            filename = doc_keys[idx]
-            text = doc_texts[idx]
+            filename = self.doc_keys[idx]
+            text = self.doc_texts[idx]
             score = float(similarities[idx])
             
-            overlap = doc_vectors[idx].multiply(query_vector).toarray()[0]
+            overlap = self.doc_vectors[idx].multiply(query_vector).toarray()[0]
             top_term_indices = overlap.argsort()[::-1][:3] # Top 3 terms
-            matched_terms = [feature_names[i] for i in top_term_indices if overlap[i] > 0]
+            matched_terms = [self.feature_names[i] for i in top_term_indices if overlap[i] > 0]
             if not matched_terms:
                 matched_terms = ["generic match"]
 

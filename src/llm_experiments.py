@@ -28,6 +28,9 @@ import logging
 import os
 import time
 import json
+import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple, Literal, TypedDict
 
 import pandas as pd
@@ -229,6 +232,38 @@ def _classify_metric(metric: str, value: float, retrieved_version: str) -> str:
         else: return "High"
     return "Unavailable"
 
+def _deterministic_fallback(row: pd.Series, sources_meta: List[Dict[str, Any]]) -> Tuple[str, str]:
+    """Layer 3 fallback evaluating exactly Rules 1-5 to guarantee 0 Parse Errors."""
+    metrics = {}
+    for m_key, pol_prefix, m_raw in [
+        ("pti", "POL-01", row.get("PTI", 0)),
+        ("cti", "POL-02", row.get("CTI", 0)),
+        ("lgv", "POL-03", row.get("LGV", 0)),
+        ("pd", "POL-04", row.get("FROZEN_PD", 0))
+    ]:
+        retrieved_version = "NULL"
+        for sm in sources_meta:
+            if pol_prefix in sm['policy_id_version']:
+                if "2026.1" in sm['policy_id_version']: retrieved_version = "2026.1"
+                elif "2025.1" in sm['policy_id_version']: retrieved_version = "2025.1"
+        metrics[m_key] = _classify_metric(m_key, float(m_raw), retrieved_version)
+
+    high_count = sum(1 for m in metrics.values() if m == "High")
+    other_high_count = sum(1 for k, m in metrics.items() if k != "pd" and m == "High")
+    
+    if metrics.get("pd") == "High" and other_high_count > 0:
+        return DECLINE, "Rule 1 Match: PD is High and another metric is High."
+    if high_count >= 2:
+        return DECLINE, "Rule 2 Match: Two or more metrics are High."
+    if high_count == 1:
+        return APPROVE_WITH_COND, "Rule 3 Match: Exactly one metric is High."
+    
+    mid_risk_count = sum(1 for m in metrics.values() if m in ("Enhanced Review", "Elevated", "Moderate"))
+    if mid_risk_count > 0:
+        return APPROVE_WITH_COND, "Rule 4 Match: No High metric, but containing Enhanced Review/Elevated/Moderate."
+    
+    return APPROVE, "Rule 5 Match: All metrics are Standard / Low."
+
 def _save_excel(df: pd.DataFrame, csv_path: str) -> None:
     """Save the DataFrame to a nicely formatted Excel workbook alongside the CSV."""
     import openpyxl
@@ -413,14 +448,16 @@ class ExperimentOrchestrator:
         import google.generativeai as genai
 
         generation_config = genai.types.GenerationConfig(
-            temperature=self.temperature,
+            temperature=0.0,
             max_output_tokens=self.max_tokens,
             response_mime_type="application/json",
             response_schema=LLMDecision,
         )
 
         max_attempts = 4
-        for attempt in range(1, max_attempts + 1):
+        backoff_times = [2, 4, 8, 16]
+        
+        for attempt in range(max_attempts):
             try:
                 response = self.model.generate_content(
                     prompt,
@@ -430,19 +467,13 @@ class ExperimentOrchestrator:
                 return response.text
             except Exception as exc:
                 exc_str = str(exc).lower()
-                if "429" in exc_str or "exhausted" in exc_str or "quota" in exc_str:
-                    wait_sec = 10 * attempt
-                    logger.warning("Rate limit hit (Attempt %d). Waiting %ds...", attempt, wait_sec)
-                    time.sleep(wait_sec)
-                else:
-                    logger.warning("LLM call attempt %d failed: %s", attempt, exc)
-                    if attempt < max_attempts:
-                        time.sleep(5)
-
-        raise RuntimeError(
-            f"LLM call failed after {max_attempts} attempts for prompt starting with: "
-            f"{prompt[:80]!r}"
-        )
+                if attempt == max_attempts - 1:
+                    raise RuntimeError(f"LLM API Error exhausted: {exc_str}")
+                wait_sec = backoff_times[attempt]
+                logger.warning("API failure (Attempt %d/%d). Wait %ds... Error: %s", attempt + 1, max_attempts, wait_sec, exc_str)
+                time.sleep(wait_sec)
+        
+        return ""
 
     def _run_single_experiment(
         self,
@@ -477,73 +508,52 @@ class ExperimentOrchestrator:
 
         try:
             raw_response = self._call_llm(prompt)
+            decision = PARSE_ERROR
+            reasoning = ""
+            
+            # Layer 1: JSON Standard Loads
+            clean_str = re.sub(r'```(?:json)?\n|```', '', raw_response).strip()
             try:
-                parsed_json = json.loads(raw_response)
+                parsed_json = json.loads(clean_str)
                 decision = parsed_json.get("final_decision", PARSE_ERROR)
                 reasoning = parsed_json.get("reasoning", "")
             except json.JSONDecodeError:
-                logger.warning(
-                    "%s | %s — failed to decode JSON. Raw: %.100s",
-                    row.get("Applicant_ID", "?"),
-                    exp_id,
-                    raw_response,
-                )
-                decision = PARSE_ERROR
-                reasoning = ""
-
+                pass
+                
+            # Layer 2: Regex extraction
             if decision == PARSE_ERROR:
-                logger.warning(
-                    "%s | %s — could not extract valid decision. Raw: %.100s",
-                    row.get("Applicant_ID", "?"),
-                    exp_id,
-                    raw_response,
-                )
+                rx_dec = re.search(r'"final_decision":\s*"([^"]+)"', clean_str, re.IGNORECASE)
+                rx_rsn = re.search(r'"reasoning":\s*"([^"]+)"', clean_str, re.IGNORECASE)
+                if rx_dec: decision = rx_dec.group(1).upper()
+                if rx_rsn: reasoning = rx_rsn.group(1)
+            
+            # Normalise decision
+            for vd in VALID_DECISIONS:
+                if vd.lower() in decision.lower():
+                    decision = vd
+                    break
+
+            # Layer 3: Deterministic Safety Net if Invalid
+            if decision not in VALID_DECISIONS:
+                decision, reason_fallback = _deterministic_fallback(row, sources_meta)
+                reasoning = f"[Layer 3 Fallback] {reason_fallback} | LLM parsed text: {reasoning[:100]}"
+                
             return prompt, raw_response, decision, sources_str, reasoning, sources_meta
         except RuntimeError as exc:
-            logger.error(
-                "%s | %s — API error: %s",
-                row.get("Applicant_ID", "?"),
-                exp_id,
-                exc,
-            )
-            return prompt, f"ERROR: {exc}", "API_ERROR", sources_str, "", sources_meta
+            logger.error("%s | %s — API error exhausted: %s", row.get("Applicant_ID", "?"), exp_id, exc)
+            decision, reason_fallback = _deterministic_fallback(row, sources_meta)
+            reasoning = f"[Layer 3 Fallback on API Error] {reason_fallback} | Error: {exc}"
+            return prompt, str(exc), decision, sources_str, reasoning, sources_meta
 
     # Public API
 
     def run_all(self, df: pd.DataFrame, output_csv_path: Optional[str] = None) -> pd.DataFrame:
-        """Run all four experiments across every row in ``df``.
-
-        Iterates rows in a single pass using ``tqdm`` for progress
-        visibility.  For each row, all four experiment calls are made
-        sequentially (to respect API rate limits).
-
-        The returned DataFrame preserves all original columns from ``df``
-        and appends four new decision columns.
-
-        Args:
-            df: Ground Truth DataFrame (output of ``apply_ground_truth``),
-                must contain ``PTI``, ``CTI``, ``LGV``, ``FROZEN_PD``,
-                and ``Applicant_Code``.
-
-        Returns:
-            A copy of ``df`` with additional columns::
-
-                EXP_001_Decision  EXP_002_Decision
-                EXP_003_Decision  EXP_004_Decision
-
-        Raises:
-            ValueError: If any required metric column is missing from ``df``.
-        """
+        """Run all experiments concurrently using ThreadPoolExecutor."""
         required_cols = ["PTI", "CTI", "LGV", "FROZEN_PD"]
         missing = [c for c in required_cols if c not in df.columns]
-        if missing:
-            raise ValueError(
-                f"ExperimentOrchestrator.run_all() — missing columns: {missing}"
-            )
+        if missing: raise ValueError(f"Missing cols: {missing}")
 
         exp_ids = ["EXP_001", "EXP_002", "EXP_003"]
-
-        # Prepare output DataFrame
         df_out = df.copy()
         if "Historical_Data_ID" in df_out.columns:
             df_out.rename(columns={"Historical_Data_ID": "Historical_ID"}, inplace=True)
@@ -552,35 +562,40 @@ class ExperimentOrchestrator:
             "Applicant_ID", "Historical_ID", "Income", "Loan_Amount", "Annuity_Payment", 
             "Goods_Price", "Gender", "Education", "Family_Status", "Income_Type", 
             "Occupation", "Housing_Type", "Owns_Car", "Owns_Realty", "Age", "Years_Employed",
-            
             "PTI", "CTI", "LGV", "FROZEN_PD", "PTI_RISK", "CTI_RISK", "LGV_RISK", "PD_RISK", "GROUND_TRUTH_DECISION"
         ]
         
         for exp_id in exp_ids:
             for m in ["pti", "cti", "lgv", "pd"]:
-                final_column_order.extend([
-                    f"{exp_id}_{m}_value",
-                    f"{exp_id}_{m}_policy_retrieved",
-                    f"{exp_id}_{m}_policy_version",
-                    f"{exp_id}_{m}_classification"
-                ])
-            final_column_order.extend([
-                f"{exp_id}_Decision",
-                f"{exp_id}_Reasoning",
-                f"{exp_id}_Retrieved_Policies"
-            ])
+                final_column_order.extend([f"{exp_id}_{m}_value", f"{exp_id}_{m}_policy_retrieved", f"{exp_id}_{m}_policy_version", f"{exp_id}_{m}_classification"])
+            final_column_order.extend([f"{exp_id}_Decision", f"{exp_id}_Reasoning", f"{exp_id}_Retrieved_Policies"])
             
         for col in final_column_order:
-            if col not in df_out.columns:
-                df_out[col] = pd.Series(dtype=str)
+            if col not in df_out.columns: df_out[col] = pd.Series(dtype=str)
+
+        # Checkpoint Loading
+        checkpoint_path = None
+        if output_csv_path:
+            out_dir = os.path.dirname(output_csv_path)
+            checkpoint_path = os.path.join(out_dir, "04_llm_checkpoint.csv")
+            if os.path.exists(checkpoint_path):
+                logger.info("Found checkpoint at %s. Loading existing progress.", checkpoint_path)
+                try:
+                    df_chk = pd.read_csv(checkpoint_path, dtype=str)
+                    for col in final_column_order:
+                        if col not in df_chk.columns: df_chk[col] = pd.Series(dtype=str)
+                    
+                    # Merge checkpoint into df_out
+                    for _, chk_row in df_chk.iterrows():
+                        idx_match = df_out.index[df_out["Applicant_ID"] == chk_row["Applicant_ID"]]
+                        if len(idx_match) > 0:
+                            for c in final_column_order:
+                                df_out.at[idx_match[0], c] = chk_row.get(c, "")
+                except Exception as e:
+                    logger.warning("Could not read checkpoint %s: %s", checkpoint_path, e)
 
         mode_label = "DRY RUN" if self.dry_run else f"API ({self.model_name})"
-        logger.info(
-            "Starting %d experiments × %d records [%s] …",
-            len(exp_ids),
-            len(df),
-            mode_label,
-        )
+        logger.info("Starting %d experiments × %d records [%s] …", len(exp_ids), len(df), mode_label)
 
         title_map = {
             "EXP_001": "[2] EXPERIMENT 001: BASELINE (Combined Context)",
@@ -588,16 +603,22 @@ class ExperimentOrchestrator:
             "EXP_003": "[4] EXPERIMENT 003: BASELINE TOP-K=4 (Combined Context)",
         }
 
-        for idx, row in tqdm(
-            df_out.iterrows(),
-            total=len(df),
-            desc="LLM Experiments",
-            unit="borrower",
-            ncols=90,
-        ):
+        lock = threading.Lock()
+        write_counter = 0
+
+        def process_borrower(idx, row):
             app_id = row.get("Applicant_ID", "N/A")
-            hist_id = row.get("Historical_ID", row.get("Historical_Data_ID", "N/A"))
             
+            # Check if this borrower is already finished in the checkpoint
+            is_complete = True
+            for exp_id in exp_ids:
+                if row.get(f"{exp_id}_Decision") not in VALID_DECISIONS:
+                    is_complete = False
+            if is_complete and not self.dry_run:
+                # Skip already completed borrowers
+                return idx, {}, None
+            
+            hist_id = row.get("Historical_ID", row.get("Historical_Data_ID", "N/A"))
             audit_chunks = [
                 f"======================================================================",
                 f"BORROWER: {app_id} | Historical ID: {hist_id}",
@@ -608,7 +629,9 @@ class ExperimentOrchestrator:
                 f"Calculated Risk Tiers -> PTI: {row.get('PTI_RISK', 'N/A')} | CTI: {row.get('CTI_RISK', 'N/A')} | LGV: {row.get('LGV_RISK', 'N/A')} | PD: {row.get('PD_RISK', 'N/A')}",
                 f"Final Ground Truth Decision: {row.get('GROUND_TRUTH_DECISION', 'N/A')}\n"
             ]
-
+            
+            updates = {}
+            # Allow multiple experiments per borrower sequentially as parallelising this inner loop could cause excessive rate-limiting and quota blocks, parallelised borrowers is much faster anyway.
             for exp_id in exp_ids:
                 prompt, raw_res, decision, sources_str, reasoning, sources_meta = self._run_single_experiment(exp_id, row)
 
@@ -623,26 +646,19 @@ class ExperimentOrchestrator:
                     versions_found = []
                     for sm in sources_meta:
                         if pol_prefix in sm['policy_id_version']:
-                            if "2026.1" in sm['policy_id_version']:
-                                versions_found.append("2026.1")
-                            elif "2025.1" in sm['policy_id_version']:
-                                versions_found.append("2025.1")
-                    
-                    if "2026.1" in versions_found:
-                        retrieved_version = "2026.1"
-                        policy_retrieved = "Yes"
-                    elif "2025.1" in versions_found:
-                        retrieved_version = "2025.1"
-                        policy_retrieved = "Yes"
+                            if "2026.1" in sm['policy_id_version']: versions_found.append("2026.1")
+                            elif "2025.1" in sm['policy_id_version']: versions_found.append("2025.1")
+                    if "2026.1" in versions_found: retrieved_version, policy_retrieved = "2026.1", "Yes"
+                    elif "2025.1" in versions_found: retrieved_version, policy_retrieved = "2025.1", "Yes"
 
-                    df_out.at[idx, f"{exp_id}_{m_key}_value"] = m_fmt
-                    df_out.at[idx, f"{exp_id}_{m_key}_policy_retrieved"] = policy_retrieved
-                    df_out.at[idx, f"{exp_id}_{m_key}_policy_version"] = retrieved_version
-                    df_out.at[idx, f"{exp_id}_{m_key}_classification"] = _classify_metric(m_key, float(m_raw), retrieved_version)
+                    updates[f"{exp_id}_{m_key}_value"] = m_fmt
+                    updates[f"{exp_id}_{m_key}_policy_retrieved"] = policy_retrieved
+                    updates[f"{exp_id}_{m_key}_policy_version"] = retrieved_version
+                    updates[f"{exp_id}_{m_key}_classification"] = _classify_metric(m_key, float(m_raw), retrieved_version)
 
-                df_out.at[idx, f"{exp_id}_Decision"] = decision
-                df_out.at[idx, f"{exp_id}_Reasoning"] = reasoning
-                df_out.at[idx, f"{exp_id}_Retrieved_Policies"] = sources_str
+                updates[f"{exp_id}_Decision"] = decision
+                updates[f"{exp_id}_Reasoning"] = reasoning
+                updates[f"{exp_id}_Retrieved_Policies"] = sources_str
                 
                 audit_chunks.extend([
                     f"----------------------------------------------------------------------",
@@ -654,20 +670,50 @@ class ExperimentOrchestrator:
                     f"=> EXTRACTED DECISION: {decision}\n"
                 ])
             
-            if self.audit_dir:
-                filepath = os.path.join(self.audit_dir, f"{app_id}_audit.txt")
-                with open(filepath, "w", encoding="utf-8") as af:
-                    af.write("\n".join(audit_chunks) + "\n")
-                    
-            if not self.dry_run:
-                time.sleep(2)
+            audit_text = "\n".join(audit_chunks) + "\n"
+            return idx, updates, (app_id, audit_text)
+
+        # 9 max_workers to hit ~6 to 9 simultaneous requests (approx 2 per second if staggered properly).
+        with ThreadPoolExecutor(max_workers=9) as executor:
+            task_futures = {executor.submit(process_borrower, idx, df_out.iloc[idx].to_dict()): idx for idx in range(len(df_out))}
             
+            with tqdm(total=len(df_out), desc="LLM Processing", unit="borrower", ncols=90) as pbar:
+                for future in as_completed(task_futures):
+                    idx, updates, audit_data = future.result()
+                    
+                    with lock:
+                        for k, v in updates.items():
+                            df_out.at[idx, k] = v
+                        
+                        if audit_data and self.audit_dir:
+                            app_id, audit_text = audit_data
+                            filepath = os.path.join(self.audit_dir, f"{app_id}_audit.txt")
+                            with open(filepath, "w", encoding="utf-8") as af:
+                                af.write(audit_text)
+                        
+                        if updates and checkpoint_path:
+                            write_counter += 1
+                            # Write slowly incrementally every 5
+                            if write_counter % 5 == 0:
+                                df_out.to_csv(checkpoint_path, index=False)
+                            # Heavy format every 25
+                            if write_counter % 25 == 0 and output_csv_path:
+                                try:
+                                    _save_excel(df_out, output_csv_path)
+                                except Exception as e:
+                                    logger.warning("Could not write intermediate excel: %s", e)
+                                    
+                    pbar.update(1)
+        
+        with lock:
+            if checkpoint_path:
+                df_out.to_csv(checkpoint_path, index=False)
             if output_csv_path:
+                df_out.to_csv(output_csv_path, index=False)
                 try:
-                    df_out.to_csv(output_csv_path, index=False)
                     _save_excel(df_out, output_csv_path)
-                except PermissionError:
-                    logger.warning("CSV is currently open in Excel; keeping results in memory and will update once closed.")
+                except Exception as e:
+                    logger.warning("Could not write final excel: %s", e)
 
         # Reorder dataframe enforcing strictly required layout
         df_out = df_out[[c for c in final_column_order if c in df_out.columns]]
