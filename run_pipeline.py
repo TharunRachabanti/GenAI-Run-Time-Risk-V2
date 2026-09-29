@@ -302,6 +302,8 @@ def main() -> None:
             else:
                 logger.warning(f"--test-mode active: limiting to the first {TEST_BORROWER_COUNT} borrowers.")
                 df_gt = df_gt.head(TEST_BORROWER_COUNT).copy()
+        
+        df_gt = df_gt.reset_index(drop=True)
     except Exception as exc:
         logger.error("Phase 1 failed: %s", exc, exc_info=True)
         sys.exit(1)

@@ -527,9 +527,9 @@ class ExperimentOrchestrator:
                 if rx_dec: decision = rx_dec.group(1).upper()
                 if rx_rsn: reasoning = rx_rsn.group(1)
             
-            # Normalise decision
-            for vd in VALID_DECISIONS:
-                if vd.lower() in decision.lower():
+            # Normalise decision (Fix Bug 1: check longest matches first)
+            for vd in ["APPROVE WITH CONDITIONS", "APPROVE", "DECLINE"]:
+                if vd.lower() in decision.lower() or vd.lower().replace(" ", "_") in decision.lower():
                     decision = vd
                     break
 
@@ -547,14 +547,14 @@ class ExperimentOrchestrator:
 
     # Public API
 
-    def run_all(self, df: pd.DataFrame, output_csv_path: Optional[str] = None) -> pd.DataFrame:
+    def run_all(self, df: pd.DataFrame, output_csv_path: Optional[str] = None, test_mode: bool = False) -> pd.DataFrame:
         """Run all experiments concurrently using ThreadPoolExecutor."""
         required_cols = ["PTI", "CTI", "LGV", "FROZEN_PD"]
         missing = [c for c in required_cols if c not in df.columns]
         if missing: raise ValueError(f"Missing cols: {missing}")
 
         exp_ids = ["EXP_001", "EXP_002", "EXP_003"]
-        df_out = df.copy()
+        df_out = df.copy().reset_index(drop=True)
         if "Historical_Data_ID" in df_out.columns:
             df_out.rename(columns={"Historical_Data_ID": "Historical_ID"}, inplace=True)
             
@@ -577,8 +577,15 @@ class ExperimentOrchestrator:
         checkpoint_path = None
         if output_csv_path:
             out_dir = os.path.dirname(output_csv_path)
-            checkpoint_path = os.path.join(out_dir, "04_llm_checkpoint.csv")
-            if os.path.exists(checkpoint_path):
+            checkpoint_file = "04_llm_checkpoint_test.csv" if test_mode else "04_llm_checkpoint.csv"
+            checkpoint_path = os.path.join(out_dir, checkpoint_file)
+            
+            if test_mode and os.path.exists(checkpoint_path):
+                # Clean stale test checkpoint
+                try: os.remove(checkpoint_path)
+                except OSError: pass
+
+            if os.path.exists(checkpoint_path) and not test_mode:
                 logger.info("Found checkpoint at %s. Loading existing progress.", checkpoint_path)
                 try:
                     df_chk = pd.read_csv(checkpoint_path, dtype=str)
