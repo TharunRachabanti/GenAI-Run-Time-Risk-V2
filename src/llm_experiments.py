@@ -160,43 +160,70 @@ _PROMPT_BUILDERS = {
 }
 
 
-# Gemini API initialisation
+# LLM Factory Router
 
-def _init_gemini(model_name: str) -> Any:
-    """Initialise the Google Generative AI client and return a GenerativeModel.
-
-    Reads the API key exclusively from the ``GEMINI_API_KEY`` environment
-    variable (set via python-dotenv / .env file).  Never reads from YAML
-    or any hardcoded value.
-
-    Args:
-        model_name: Gemini model identifier (e.g. ``"gemini-1.5-flash"``).
-
-    Returns:
-        A configured ``google.generativeai.GenerativeModel`` instance.
-
-    Raises:
-        EnvironmentError: If ``GEMINI_API_KEY`` is not set.
-        ImportError: If ``google-generativeai`` is not installed.
-    """
-    try:
-        import google.generativeai as genai
-    except ImportError as exc:
-        raise ImportError(
-            "google-generativeai is not installed. "
-            "Run: pip install google-generativeai"
-        ) from exc
-
-    api_key: Optional[str] = os.getenv("GEMINI_API_KEY")
+def generate_llm_response(prompt: str, provider: str, model_name: str, api_key: str, temperature: float, max_tokens: int, timeout: int) -> str:
+    """Route LLM request to the correct provider and enforce valid JSON structure."""
     if not api_key:
-        raise EnvironmentError(
-            "GEMINI_API_KEY environment variable is not set. "
-            "Copy .env.example to .env and add your key."
-        )
+        raise EnvironmentError(f"LLM_API_KEY environment variable is not set for {provider}.")
 
-    genai.configure(api_key=api_key)
-    logger.info("Gemini API configured with model: %s", model_name)
-    return genai.GenerativeModel(model_name)
+    provider = provider.lower()
+    
+    if provider == "gemini":
+        try:
+            import google.generativeai as genai
+        except ImportError as exc:
+            raise ImportError("google-generativeai is not installed.") from exc
+        
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+        generation_config = genai.types.GenerationConfig(
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+            response_mime_type="application/json",
+            response_schema=LLMDecision,
+        )
+        response = model.generate_content(prompt, generation_config=generation_config, request_options={"timeout": timeout})
+        return response.text
+
+    elif provider in ["openai", "groq"]:
+        try:
+            import openai
+        except ImportError as exc:
+            raise ImportError("openai is not installed.") from exc
+
+        base_url = "https://api.groq.com/openai/v1" if provider == "groq" else None
+        client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+            timeout=timeout
+        )
+        return response.choices[0].message.content
+
+    elif provider == "anthropic":
+        try:
+            import anthropic
+        except ImportError as exc:
+            raise ImportError("anthropic is not installed.") from exc
+            
+        client = anthropic.Anthropic(api_key=api_key)
+        prompt_with_json_directive = prompt + "\n\nYou MUST format your response as valid JSON returning exactly final_decision and reasoning string keys."
+        
+        response = client.messages.create(
+            model=model_name,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            messages=[{"role": "user", "content": prompt_with_json_directive}],
+            timeout=timeout
+        )
+        return response.content[0].text
+    else:
+        raise ValueError(f"Unsupported LLM provider: {provider}")
 
 
 def _classify_metric(metric: str, value: float, retrieved_version: str) -> str:
@@ -410,16 +437,17 @@ class ExperimentOrchestrator:
         self.audit_dir = audit_dir
 
         llm_cfg = cfg["llm"]
-        self.model_name:      str   = llm_cfg["model_name"]
-        self.temperature:     float = float(llm_cfg["temperature"])
-        self.max_tokens:      int   = int(llm_cfg["max_tokens"])
-        self.request_timeout: int   = int(llm_cfg["request_timeout"])
+        self.provider:        str   = os.getenv("LLM_PROVIDER", llm_cfg.get("provider", "gemini"))
+        self.model_name:      str   = os.getenv("LLM_MODEL_NAME", llm_cfg.get("model_name", "gemini-1.5-flash"))
+        self.api_key:         str   = os.getenv("LLM_API_KEY", "")
+        self.temperature:     float = float(llm_cfg.get("temperature", 0.0))
+        self.max_tokens:      int   = int(llm_cfg.get("max_tokens", 8192))
+        self.request_timeout: int   = int(llm_cfg.get("request_timeout", 60))
 
-        # Initialise LLM client
-        self.model: Optional[Any] = None
-        if not self.dry_run:
-            self.model = _init_gemini(self.model_name)
-        else:
+        if not self.api_key and not self.dry_run:
+            raise EnvironmentError("LLM_API_KEY environment variable is not set. Copy .env.example to .env and configure.")
+
+        if self.dry_run:
             logger.info("ExperimentOrchestrator: dry_run=True — LLM calls skipped.")
         
         self._exp_top_k: Dict[str, int] = {
@@ -431,10 +459,9 @@ class ExperimentOrchestrator:
     # Private helpers
 
     def _call_llm(self, prompt: str) -> str:
-        """Send a single prompt to the Gemini API and return the response text.
+        """Route to LLM factory and return the response text.
 
-        Implements an exponential backoff strategy: catches 429 Too Many Requests
-        or ResourceExhausted errors, waits progressively, and retries.
+        Implements an exponential backoff strategy for API errors.
 
         Args:
             prompt: The complete, formatted prompt string.
@@ -445,26 +472,21 @@ class ExperimentOrchestrator:
         Raises:
             RuntimeError: If all retry attempts fail.
         """
-        import google.generativeai as genai
-
-        generation_config = genai.types.GenerationConfig(
-            temperature=0.0,
-            max_output_tokens=self.max_tokens,
-            response_mime_type="application/json",
-            response_schema=LLMDecision,
-        )
-
         max_attempts = 4
         backoff_times = [2, 4, 8, 16]
         
         for attempt in range(max_attempts):
             try:
-                response = self.model.generate_content(
-                    prompt,
-                    generation_config=generation_config,
-                    request_options={"timeout": self.request_timeout},
+                text = generate_llm_response(
+                    prompt=prompt,
+                    provider=self.provider,
+                    model_name=self.model_name,
+                    api_key=self.api_key,
+                    temperature=0.0,
+                    max_tokens=self.max_tokens,
+                    timeout=self.request_timeout
                 )
-                return response.text
+                return text
             except Exception as exc:
                 exc_str = str(exc).lower()
                 if attempt == max_attempts - 1:

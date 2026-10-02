@@ -74,10 +74,10 @@ ground_truth:
     # >= 7.0 → High
 
 # ── LLM Settings ──────────────────────────────────────────────
-# API key is loaded from .env → GEMINI_API_KEY. Never store it here.
+# API key is loaded from .env → LLM_API_KEY. Never store it here.
 llm:
   provider:        "gemini"
-  model_name:      "gemini-3.6-flash"
+  model_name:      "gemini-1.5-flash"
   temperature:     0.1       # Low temperature for deterministic risk decisions
   max_tokens:      8192
   request_timeout: 60        # Seconds before giving up on an API call
