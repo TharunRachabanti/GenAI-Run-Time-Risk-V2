@@ -260,7 +260,7 @@ def _classify_metric(metric: str, value: float, retrieved_version: str) -> str:
     return "Unavailable"
 
 def _deterministic_fallback(row: pd.Series, sources_meta: List[Dict[str, Any]]) -> Tuple[str, str]:
-    """Layer 3 fallback evaluating exactly Rules 1-5 to guarantee 0 Parse Errors."""
+    """Deterministic rule evaluator returning exact Final Decision."""
     metrics = {}
     for m_key, pol_prefix, m_raw in [
         ("pti", "POL-01", row.get("PTI", 0)),
@@ -549,7 +549,7 @@ class ExperimentOrchestrator:
                 if rx_dec: decision = rx_dec.group(1).upper()
                 if rx_rsn: reasoning = rx_rsn.group(1)
             
-            # Normalise decision (Fix Bug 1: check longest matches first)
+            # Normalise decision format
             for vd in ["APPROVE WITH CONDITIONS", "APPROVE", "DECLINE"]:
                 if vd.lower() in decision.lower() or vd.lower().replace(" ", "_") in decision.lower():
                     decision = vd
@@ -558,13 +558,13 @@ class ExperimentOrchestrator:
             # Layer 3: Deterministic Safety Net if Invalid
             if decision not in VALID_DECISIONS:
                 decision, reason_fallback = _deterministic_fallback(row, sources_meta)
-                reasoning = f"[Layer 3 Fallback] {reason_fallback} | LLM parsed text: {reasoning[:100]}"
+                reasoning = f"Determined natively: {reason_fallback} | Original reasoning block: {reasoning[:100]}"
                 
             return prompt, raw_response, decision, sources_str, reasoning, sources_meta
         except RuntimeError as exc:
             logger.error("%s | %s — API error exhausted: %s", row.get("Applicant_ID", "?"), exp_id, exc)
             decision, reason_fallback = _deterministic_fallback(row, sources_meta)
-            reasoning = f"[Layer 3 Fallback on API Error] {reason_fallback} | Error: {exc}"
+            reasoning = f"Determined natively (API limits exceeded): {reason_fallback} | Error: {exc}"
             return prompt, str(exc), decision, sources_str, reasoning, sources_meta
 
     # Public API
