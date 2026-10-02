@@ -566,13 +566,13 @@ class ExperimentOrchestrator:
             # Layer 3: Deterministic Safety Net if Invalid
             if decision not in VALID_DECISIONS:
                 decision, reason_fallback = _deterministic_fallback(row, sources_meta)
-                reasoning = f"Determined natively: {reason_fallback} | Original reasoning block: {reasoning[:100]}"
+                reasoning = f"[SYSTEM FALLBACK - LLM UNAVAILABLE] Deterministic rules applied: {reason_fallback} | Original reasoning block: {reasoning[:100]}"
                 
             return prompt, raw_response, decision, sources_str, reasoning, sources_meta
         except RuntimeError as exc:
             logger.error("%s | %s — API error exhausted: %s", row.get("Applicant_ID", "?"), exp_id, exc)
             decision, reason_fallback = _deterministic_fallback(row, sources_meta)
-            reasoning = f"Determined natively (API limits exceeded): {reason_fallback} | Error: {exc}"
+            reasoning = f"[SYSTEM FALLBACK - LLM UNAVAILABLE] Deterministic rules applied: {reason_fallback} | Error: {exc}"
             return prompt, str(exc), decision, sources_str, reasoning, sources_meta
 
     # Public API
