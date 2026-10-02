@@ -437,17 +437,19 @@ class ExperimentOrchestrator:
         self.parser = parser
         self.dry_run = dry_run
         self.audit_dir = audit_dir
-
-        llm_cfg = cfg["llm"]
-        self.provider:        str   = os.getenv("LLM_PROVIDER", llm_cfg.get("provider", "gemini"))
-        self.model_name:      str   = os.getenv("LLM_MODEL_NAME", llm_cfg.get("model_name", "gemini-1.5-flash"))
-        self.api_key:         str   = os.getenv("LLM_API_KEY", "")
+        
+        llm_cfg = cfg.get("llm", {})
+        self.provider:        str   = os.getenv("LLM_PROVIDER")
+        self.model_name:      str   = os.getenv("LLM_MODEL_NAME")
+        self.api_key:         str   = os.getenv("LLM_API_KEY")
+        
         self.temperature:     float = float(llm_cfg.get("temperature", 0.0))
         self.max_tokens:      int   = int(llm_cfg.get("max_tokens", 8192))
         self.request_timeout: int   = int(llm_cfg.get("request_timeout", 60))
-
-        if not self.api_key and not self.dry_run:
-            raise EnvironmentError("LLM_API_KEY environment variable is not set. Copy .env.example to .env and configure.")
+        
+        if not self.api_key or not self.provider or not self.model_name:
+            if not self.dry_run:
+                raise EnvironmentError("LLM_PROVIDER, LLM_MODEL_NAME, or LLM_API_KEY environment variables are missing.")
 
         if self.dry_run:
             logger.info("ExperimentOrchestrator: dry_run=True — LLM calls skipped.")
