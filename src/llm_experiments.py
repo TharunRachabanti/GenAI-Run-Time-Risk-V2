@@ -195,9 +195,11 @@ def generate_llm_response(prompt: str, provider: str, model_name: str, api_key: 
         base_url = "https://api.groq.com/openai/v1" if provider == "groq" else None
         client = openai.OpenAI(api_key=api_key, base_url=base_url)
         
+        prompt_with_json_directive = prompt + "\n\nYou MUST format your response as valid JSON returning exactly final_decision and reasoning string keys."
+        
         response = client.chat.completions.create(
             model=model_name,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": prompt_with_json_directive}],
             temperature=temperature,
             max_tokens=max_tokens,
             response_format={"type": "json_object"},
@@ -489,10 +491,16 @@ class ExperimentOrchestrator:
                 return text
             except Exception as exc:
                 exc_str = str(exc).lower()
+                
+                # Immediately fail on fatal configuration/auth errors (400, 401, 403)
+                if any(err in exc_str for err in ["400", "401", "403", "unauthorized", "api_key", "bad request"]):
+                    logger.error("Fatal LLM API Configuration Error: %s", exc)
+                    raise RuntimeError(f"Fatal LLM Error: {exc}")
+                    
                 if attempt == max_attempts - 1:
                     raise RuntimeError(f"LLM API Error exhausted: {exc_str}")
                 wait_sec = backoff_times[attempt]
-                logger.warning("API failure (Attempt %d/%d). Wait %ds... Error: %s", attempt + 1, max_attempts, wait_sec, exc_str)
+                logger.warning("API failure (%s, Attempt %d/%d). Wait %ds... Error: %s", self.provider, attempt + 1, max_attempts, wait_sec, exc_str)
                 time.sleep(wait_sec)
         
         return ""
